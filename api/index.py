@@ -5,15 +5,15 @@ import zipfile
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 표준 규격 연동 미결 지불관리 포털 API",
-    version="4.4.0",
+    description="SamsApi 실시간 연동 및 스펙 스캐너(Inspector) 탑재 포털 API",
+    version="4.5.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
@@ -98,41 +98,19 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SamsApi 카탈로그 스펙 수신 및 실시간 연동 Engine
+# SamsApi 실시간 연동 Engine
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
     
-    # 1. UI 사용자 직접 지정 URL 우선 적용
     if payload.custom_api_url and payload.custom_api_url.strip() != "":
         candidates = [payload.custom_api_url.strip()]
     else:
-        candidates = []
-        # 2. SamsApi 표준 매뉴얼 절차: accounting 도메인 스펙 실시간 탐색 (GET /openapi.json?domain=accounting)
-        spec_urls = [
-            f"{SAMSAPI_BASE_URL}/openapi.json?domain=accounting",
-            f"{SAMSAPI_BASE_URL}/openapi.json"
-        ]
-        
-        for spec_url in spec_urls:
-            try:
-                spec_res = requests.get(spec_url, headers=headers, timeout=3)
-                if spec_res.status_code == 200:
-                    paths = spec_res.json().get("paths", {})
-                    for path in paths.keys():
-                        if "ntstl" in path:
-                            candidates.append(f"{SAMSAPI_BASE_URL}{path}")
-                            break
-                if candidates: break
-            except Exception:
-                pass
-                
-        # 기본 후보군 추가
-        candidates.extend([
+        candidates = [
             f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
             f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
             f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list"
-        ])
+        ]
 
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     req_body = {
@@ -193,11 +171,11 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         except requests.exceptions.Timeout:
             return [{"error_msg": f"연결 시간 초과 ({api_url})"}]
         except requests.exceptions.ConnectionError:
-            return [{"error_msg": f"접속 거부 (IIS/방화벽 확인 필요: {api_url})"}]
+            return [{"error_msg": f"접속 거부 ({api_url})"}]
         except Exception as e:
             last_error_msg = str(e)
             
-    return [{"error_msg": last_error_msg or "SamsApi 도메인 경로 탐색 실패 (404)"}]
+    return [{"error_msg": last_error_msg or "404 에러. 상단 [등록된 API 경로 전체 스캔] 버튼을 클릭해 실제 경로를 확인하세요."}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -234,16 +212,25 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">SamsApi 표준 연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-info text-dark fs-6 ms-2">스펙 Inspector 🔍</span></span>
+            <button class="btn btn-warning fw-bold btn-sm" onclick="inspectSamsapiSpec()">🔍 SAMSAPI 등록 경로 전체 스캔</button>
         </nav>
         
+        <!-- 디버그 전용 URL 테스트 UI -->
         <div class="card p-3 mb-4 border-primary">
             <h5 class="fw-bold text-primary mb-3">🛠 API 호출 커스텀 테스트</h5>
             <div class="input-group">
                 <span class="input-group-text bg-primary text-white fw-bold">API 주소</span>
-                <input type="text" class="form-control" id="customApiUrl" value="" placeholder="자동 탐색 미사용 시 입력 (예: http://211.104.10.171:7071/accounting/api/v1/ntstl/list)">
+                <input type="text" class="form-control" id="customApiUrl" value="" placeholder="스캔 결과에 나온 실제 주소를 선택 또는 입력하세요">
                 <button class="btn btn-primary fw-bold" onclick="loadPendingData(false)">실시간 API 조회</button>
                 <button class="btn btn-mock fw-bold" onclick="loadPendingData(true)">MOCK 복귀</button>
+            </div>
+            <!-- 스펙 스캔 결과 표시 창 -->
+            <div id="specInspectResult" class="mt-3 d-none">
+                <div class="alert alert-dark mb-0">
+                    <h6 class="fw-bold text-warning">📌 SAMSAPI 서버 등록 경로 스캔 결과:</h6>
+                    <ul id="pathList" class="mb-0 font-monospace small"></ul>
+                </div>
             </div>
         </div>
 
@@ -331,6 +318,32 @@ def render_portal_ui():
         </div>
 
         <script>
+            async function inspectSamsapiSpec() {
+                const resBox = document.getElementById("specInspectResult");
+                const pathList = document.getElementById("pathList");
+                resBox.classList.remove("d-none");
+                pathList.innerHTML = "<li>SAMSAPI 서버 스펙 로딩 중...</li>";
+                
+                try {
+                    const res = await fetch('/api/pending/inspect-spec');
+                    const json = await res.json();
+                    pathList.innerHTML = "";
+                    
+                    if(json.paths && json.paths.length > 0) {
+                        json.paths.forEach(p => {
+                            const li = document.createElement("li");
+                            const fullUrl = `http://211.104.10.171:7071${p}`;
+                            li.innerHTML = `<a href="#" class="text-warning text-decoration-none" onclick="document.getElementById('customApiUrl').value='${fullUrl}'; return false;">${fullUrl}</a>`;
+                            pathList.appendChild(li);
+                        });
+                    } else {
+                        pathList.innerHTML = `<li class="text-danger">${json.message || '등록된 API 경로를 찾지 못했습니다.'}</li>`;
+                    }
+                } catch(e) {
+                    pathList.innerHTML = `<li class="text-danger">스캔 오류: ${e.message}</li>`;
+                }
+            }
+
             function buildSearchPayload(useMock = false) {
                 return {
                     branch_code: "본사",
@@ -351,7 +364,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 스펙 분석 및 처리 중...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터 수신 처리 중입니다...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -423,12 +436,40 @@ def render_portal_ui():
             }
 
             window.onload = function() {
-                loadPendingData(true); // 페이지 로드 시 기본 MOCK 데이터 바인딩
+                loadPendingData(true);
             };
         </script>
     </body>
     </html>
     """
+
+# ---------------------------------------------------------
+# SAMSAPI 등록 경로 탐색 전용 엔드포인트
+# ---------------------------------------------------------
+@app.get("/api/pending/inspect-spec")
+def inspect_samsapi_spec():
+    headers = {"X-API-Key": SAMSAPI_KEY}
+    spec_urls = [
+        f"{SAMSAPI_BASE_URL}/openapi.json?domain=accounting",
+        f"{SAMSAPI_BASE_URL}/openapi.json?domain=all",
+        f"{SAMSAPI_BASE_URL}/openapi.json"
+    ]
+    
+    found_paths = []
+    
+    for url in spec_urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                paths = res.json().get("paths", {})
+                for p in paths.keys():
+                    found_paths.append(p)
+                if found_paths:
+                    return {"status": "success", "source_url": url, "paths": found_paths}
+        except Exception as e:
+             pass
+             
+    return {"status": "fail", "message": f"SAMSAPI 서버({SAMSAPI_BASE_URL})에서 openapi.json 스펙을 읽지 못했습니다. 키 및 권한을 확인하세요.", "paths": []}
 
 # ---------------------------------------------------------
 # API 엔드포인트 구현
