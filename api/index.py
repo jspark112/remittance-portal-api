@@ -2,6 +2,7 @@ import io
 import os
 import requests
 import zipfile
+import traceback
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Response
@@ -12,14 +13,14 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (에러 처리 완벽 보완)",
-    version="3.3.0",
+    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (에러 방어 100% 보완)",
+    version="4.0.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수
+# 환경 변수 설정
 # ---------------------------------------------------------
 SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
 SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
@@ -65,9 +66,6 @@ def calculate_payment_date(occur_date_str: str, request_date_str: str, vendor_na
     days_to_add_map = {0: 1, 1: 0, 2: 2, 3: 1, 4: 0, 5: 3, 6: 2}
     return (base_target_dt + timedelta(days=days_to_add_map[weekday])).strftime("%Y-%m-%d")
 
-# ---------------------------------------------------------
-# Pydantic 모델
-# ---------------------------------------------------------
 class PendingSearchQuery(BaseModel):
     branch_code: str = Field(default="본사")
     start_date: Optional[str] = None
@@ -85,7 +83,7 @@ class PaymentDateSaveRequest(BaseModel):
     target_payment_date: str
 
 # ---------------------------------------------------------
-# Mock 데이터 생성
+# Mock 데이터 생성 (테스트용)
 # ---------------------------------------------------------
 def get_mock_pending_data() -> List[dict]:
     items = [
@@ -101,17 +99,13 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SAMSAPI 실시간 연동 및 에러 방어 로직
+# SAMSAPI 실시간 연동 로직
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     api_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
-    headers = {
-        "X-API-Key": SAMSAPI_KEY,
-        "Content-Type": "application/json"
-    }
+    headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
     
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
-    
     req_body = {
         "company_code": "01",
         "target_date": target_dt.replace("-", ""),
@@ -120,9 +114,7 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     }
     
     parsed_items = []
-    
     try:
-        # 타임아웃 5초 지정 (방화벽 차단 시 무한 대기 방지)
         res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
         
         if res.status_code == 200:
@@ -136,7 +128,6 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     def format_date(d_str):
                         if d_str and len(d_str) == 8: return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
                         return d_str
-                        
                     occur_date = format_date(raw.get("occur_date", ""))
                     due_date = format_date(raw.get("due_date", ""))
                     
@@ -147,28 +138,15 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     balance_amount = parse_float(raw.get("occur_amount_bal"))
                     krw_balance = parse_float(raw.get("local_amount_bal"))
                     
-                    if payload.unsettled_only and balance_amount <= 0:
-                        continue
+                    if payload.unsettled_only and balance_amount <= 0: continue
                         
                     auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
-                    
                     parsed_items.append({
-                        "pending_no": pending_no,
-                        "account_code": raw.get("account_code", ""),
-                        "account_name": raw.get("account_name", ""),
-                        "vendor_code": raw.get("customer_code", ""),
-                        "vendor_name": vendor_name,
-                        "occur_date": occur_date,
-                        "acc_date": format_date(raw.get("from_date", "")),
-                        "payment_request_date": due_date,
-                        "currency": raw.get("currency_code", "KRW"),
-                        "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                        "occur_amount": parse_float(raw.get("occur_amount_ocr")),
-                        "balance_amount": balance_amount,
-                        "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date,
-                        "scheduled_payment_date": auto_date,
-                        "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                        "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                        "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": format_date(raw.get("from_date", "")),
+                        "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                        "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
+                        "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
                         "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"{vendor_name}_증빙.pdf", "download_url": "#"}]
                     })
                 return parsed_items
@@ -177,29 +155,19 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         else:
              return [{"error_msg": f"서버 통신 오류 (HTTP {res.status_code})"}]
     except requests.exceptions.Timeout:
-         return [{"error_msg": "사내 API 연결 시간 초과 (Vercel에서 사내 방화벽 7071 포트 접근이 차단되었는지 확인하세요)"}]
+         return [{"error_msg": "사내 API 연결 시간 초과 (방화벽 7071 포트가 Vercel 클라우드에서 접근 차단됨)"}]
     except requests.exceptions.ConnectionError:
-         return [{"error_msg": "사내 API 서버 접속 실패 (방화벽 차단 또는 IP가 외부망에서 접근 불가능함)"}]
+         return [{"error_msg": "사내 API 서버 접속 거부 (VPN/내부망 방화벽 차단 상태)"}]
     except Exception as e:
-         return [{"error_msg": f"예기치 않은 오류 발생: {str(e)}"}]
+         return [{"error_msg": f"오류 발생: {str(e)}"}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
-    # 에러 메시지 객체는 필터링 패스
-    if data and data[0].get("error_msg"):
-        return data
-
-    if payload.start_date and payload.start_date.strip() not in ["", "string"]:
-        data = [item for item in data if item["occur_date"] >= payload.start_date]
-    if payload.end_date and payload.end_date.strip() not in ["", "string"]:
-        data = [item for item in data if item["occur_date"] <= payload.end_date]
-
-    if payload.pay_start_date and payload.pay_start_date.strip() not in ["", "string"]:
-        data = [item for item in data if item["scheduled_payment_date"] >= payload.pay_start_date]
-    if payload.pay_end_date and payload.pay_end_date.strip() not in ["", "string"]:
-        data = [item for item in data if item["scheduled_payment_date"] <= payload.pay_end_date]
-
-    if payload.pending_no and payload.pending_no.strip() not in ["", "string"]:
-        data = [item for item in data if item["pending_no"] == payload.pending_no]
+    if data and data[0].get("error_msg"): return data
+    if payload.start_date and payload.start_date.strip() not in ["", "string"]: data = [item for item in data if item["occur_date"] >= payload.start_date]
+    if payload.end_date and payload.end_date.strip() not in ["", "string"]: data = [item for item in data if item["occur_date"] <= payload.end_date]
+    if payload.pay_start_date and payload.pay_start_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] >= payload.pay_start_date]
+    if payload.pay_end_date and payload.pay_end_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] <= payload.pay_end_date]
+    if payload.pending_no and payload.pending_no.strip() not in ["", "string"]: data = [item for item in data if item["pending_no"] == payload.pending_no]
     return data
 
 # ---------------------------------------------------------
@@ -344,8 +312,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                // 조회 누르면 하단 요약표부터 초기화
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터를 불러오는 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터를 처리 중입니다...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -355,17 +322,21 @@ def render_portal_ui():
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(payload)
                     });
-                    
-                    if (!res.ok) {
-                        throw new Error(`서버 내부 에러 (HTTP ${res.status})`);
-                    }
 
-                    const data = await res.json();
-                    tbody.innerHTML = ""; 
+                    // 1. 서버 응답을 우선 텍스트로 받아 에러 방어
+                    const text = await res.text();
+                    let data;
                     
-                    // 백엔드에서 전달한 명시적 에러 메시지가 있을 경우
+                    try {
+                        data = JSON.parse(text);
+                    } catch (parseErr) {
+                        tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 서버 연결 실패 (방화벽 차단 의심) : ${text.substring(0,50)}...</td></tr>`;
+                        return;
+                    }
+                    
+                    // 2. 백엔드에서 넘겨준 커스텀 에러 메시지 검사
                     if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [접속 에러] ${data[0].error_msg}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [통신 에러] ${data[0].error_msg}</td></tr>`;
                          return;
                     }
                     
@@ -374,7 +345,9 @@ def render_portal_ui():
                         return;
                     }
 
+                    // 3. 정상 데이터 렌더링
                     let summary = {}; let grandTotalKrw = 0;
+                    tbody.innerHTML = "";
 
                     data.forEach(item => {
                         let curr = item.currency;
@@ -406,7 +379,7 @@ def render_portal_ui():
                     }
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
                 } catch(e) {
-                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 화면 로딩 오류: ${e.message}</td></tr>`;
+                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 화면 스크립트 오류: ${e.message}</td></tr>`;
                 }
             }
 
@@ -437,7 +410,6 @@ def render_portal_ui():
             }
 
             window.onload = function() {
-                // 첫 진입시 초기화
                 document.getElementById("pendingTableBody").innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>';
             };
         </script>
@@ -446,19 +418,21 @@ def render_portal_ui():
     """
 
 # ---------------------------------------------------------
-# API 엔드포인트 구현 
-# ※ response_model을 제거하여 동적 에러 메시지(dict)가 그대로 JSON으로 반환되도록 수정
+# API 엔드포인트 구현 (모든 에러를 안전하게 catch 처리)
 # ---------------------------------------------------------
 @app.get("/")
 def read_root(): return {"status": "online"}
 
 @app.post("/api/pending/search-and-schedule")
 def search_and_schedule_pending(payload: PendingSearchQuery):
-    if payload.use_mock:
-         raw_data = get_mock_pending_data()
-    else:
-         raw_data = fetch_real_pending_data(payload)
-    return filter_data(payload, raw_data)
+    try:
+        if payload.use_mock:
+             raw_data = get_mock_pending_data()
+        else:
+             raw_data = fetch_real_pending_data(payload)
+        return filter_data(payload, raw_data)
+    except Exception as e:
+        return [{"error_msg": f"백엔드 서버 처리 오류: {str(e)}"}]
 
 @app.post("/api/pending/save-payment-date")
 def save_payment_date(payload: PaymentDateSaveRequest):
@@ -473,7 +447,7 @@ def export_plan_excel(payload: PendingSearchQuery):
     
     summary = {}; grand_krw = 0
     for row in filtered_data:
-        if row.get("error_msg"): continue # 에러 데이터는 엑셀 제외
+        if row.get("error_msg"): continue
         ws.append([row["scheduled_payment_date"], row["pending_no"], row["account_code"], row["account_name"], row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
         curr = row["currency"]
         if curr not in summary: summary[curr] = {"orig": 0, "krw": 0}
