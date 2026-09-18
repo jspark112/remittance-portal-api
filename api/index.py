@@ -12,15 +12,12 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (401 인증 강화 버전)",
-    version="8.0.0"
+    description="SamsApi 실시간 연동 (API Key 동적 테스터 탑재)",
+    version="8.1.0"
 )
 
-# ---------------------------------------------------------
-# 🚨 도메인 및 API Key 하드코딩
-# ---------------------------------------------------------
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
-SAMSAPI_KEY = "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw"
+DEFAULT_SAMSAPI_KEY = "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw"
 
 REGULAR_SUPPLIERS = {
     "한라시스템", "해동구명설비(주)", "한라레벨(주)-한라IMS(주)", "정양엔지니어링",
@@ -64,6 +61,7 @@ class PendingSearchQuery(BaseModel):
     pending_no: Optional[str] = None
     unsettled_only: bool = True
     use_mock: Optional[bool] = False
+    api_key: Optional[str] = None # 화면에서 입력받은 API 키
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
@@ -80,18 +78,17 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
-    # 🚨 401 에러 방지를 위해 X-API-Key와 Authorization(Bearer) 두 가지 형태를 동시에 보냄
+    # 화면에서 키를 입력했으면 그 키를, 아니면 하드코딩된 기본 키를 사용
+    active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
+    
     headers = {
-        "X-API-Key": SAMSAPI_KEY,
-        "Authorization": f"Bearer {SAMSAPI_KEY}",
+        "X-API-Key": active_key,
+        "Authorization": f"Bearer {active_key}", # 혹시 몰라 Bearer 토큰 형식도 같이 전송
         "Content-Type": "application/json"
     }
     
-    candidates = [
-        f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
-        f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
-        f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list"
-    ]
+    # 드디어 정확히 찾아낸 그 주소!
+    api_url = f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list"
 
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     req_body = {
@@ -100,48 +97,43 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
 
-    last_error_msg = ""
-    for api_url in candidates:
-        try:
-            res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=8)
-            if res.status_code == 404:
-                last_error_msg = f"HTTP 404 (경로 없음) - 주소: {api_url}"
-                continue
-            if res.status_code == 401:
-                last_error_msg = f"인증 실패 (HTTP 401) - 전산팀에 API Key 권한/만료 여부를 확인해주세요. ({api_url})"
-                continue
-            if res.status_code == 200:
-                json_data = res.json()
-                if json_data.get("success"):
-                    raw_list = json_data.get("data", [])
-                    parsed_items = []
-                    for raw in raw_list:
-                        def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                        occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
-                        def parse_float(val):
-                            try: return float(val) if val else 0.0
-                            except: return 0.0
-                            
-                        krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
-                        balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
-                        if payload.unsettled_only and balance_amount <= 0: continue
-                            
-                        auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
-                        parsed_items.append({
-                            "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                            "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
-                            "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                            "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                            "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
-                            "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
-                        })
-                    return parsed_items
-                else: return [{"error_msg": f"API 로직 실패: {json_data.get('message')} - URL: {api_url}"}]
-            else: return [{"error_msg": f"서버 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
-        except requests.exceptions.Timeout: return [{"error_msg": f"연결 시간 초과 ({api_url})"}]
-        except requests.exceptions.ConnectionError: return [{"error_msg": f"접속 거부 ({api_url})"}]
-        except Exception as e: last_error_msg = str(e)
-    return [{"error_msg": last_error_msg or "올바른 경로 또는 인증을 통과하지 못했습니다."}]
+    try:
+        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
+        if res.status_code == 404:
+            return [{"error_msg": f"HTTP 404 (경로 없음) - 주소: {api_url}"}]
+        if res.status_code == 401:
+            return [{"error_msg": f"인증 실패 (HTTP 401) - API Key가 만료되었거나 IP 차단됨. 새 키를 발급받아 상단 입력창에 넣고 다시 조회하세요."}]
+        if res.status_code == 200:
+            json_data = res.json()
+            if json_data.get("success"):
+                raw_list = json_data.get("data", [])
+                parsed_items = []
+                for raw in raw_list:
+                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
+                    occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
+                    def parse_float(val):
+                        try: return float(val) if val else 0.0
+                        except: return 0.0
+                        
+                    krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
+                    balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
+                    if payload.unsettled_only and balance_amount <= 0: continue
+                        
+                    auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
+                    parsed_items.append({
+                        "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                        "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
+                        "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                        "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
+                        "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                        "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
+                    })
+                return parsed_items
+            else: return [{"error_msg": f"API 데이터 실패: {json_data.get('message')} - URL: {api_url}"}]
+        else: return [{"error_msg": f"서버 응답 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
+    except requests.exceptions.Timeout: return [{"error_msg": f"연결 시간 초과 - 방화벽(8400포트) 차단 확인"}]
+    except requests.exceptions.ConnectionError: return [{"error_msg": f"접속 거부 - 도메인 장애 또는 Vercel 차단"}]
+    except Exception as e: return [{"error_msg": f"백엔드 로직 오류: {str(e)}"}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -167,7 +159,6 @@ def render_portal_ui():
             .card { border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
             .table-header { background-color: #2b4c7e; color: white; }
             .btn-excel { background-color: #1d6f42; color: white; }
-            .btn-zip { background-color: #6f42c1; color: white; }
             .btn-mock { background-color: #6c757d; color: white; border-color: #6c757d; }
             .bg-summary { background-color: #fffbeb; }
             .date-input { background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold;}
@@ -175,9 +166,20 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-danger fs-6 ms-2">401 인증 강화 버전 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">API Key 동적 교체 지원 🟢</span></span>
         </nav>
         
+        <!-- 🚨 새로 추가된 API Key 입력창 -->
+        <div class="card p-3 mb-4 border-primary">
+            <h5 class="fw-bold text-primary mb-3">🔑 인증 정보 설정 (전산팀 발급 키)</h5>
+            <div class="input-group">
+                <span class="input-group-text bg-primary text-white fw-bold">SAMSAPI Key</span>
+                <input type="text" class="form-control fw-bold" id="customApiKey" value="Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw" placeholder="새로운 API Key를 발급받으면 여기에 붙여넣으세요">
+                <button class="btn btn-warning fw-bold" onclick="loadPendingData(false)">이 인증키로 조회(API)</button>
+            </div>
+            <small class="text-muted mt-2">※ 401 에러가 나면 전산팀에 새 키를 발급받아 위 칸에 붙여넣기만 하면 바로 실데이터가 연동됩니다.</small>
+        </div>
+
         <div class="card p-3 mb-4">
             <h5 class="fw-bold text-secondary mb-3">🔍 미결 조회 조건</h5>
             <div class="row g-3">
@@ -193,7 +195,6 @@ def render_portal_ui():
                     <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                     <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
                     <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">엑셀(계획)</button>
-                    <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">증빙 ZIP</button>
                 </div>
             </div>
         </div>
@@ -228,7 +229,8 @@ def render_portal_ui():
             function buildSearchPayload(useMock = false) {
                 return {
                     branch_code: "본사", start_date: document.getElementById("startDate").value, end_date: document.getElementById("endDate").value,
-                    unsettled_only: true, use_mock: useMock
+                    unsettled_only: true, use_mock: useMock,
+                    api_key: document.getElementById("customApiKey").value // 화면의 키워드를 페이로드에 담아 전송
                 };
             }
 
@@ -237,7 +239,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="8" class="py-4 text-primary fw-bold">데이터 조회 중...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="py-4 text-primary fw-bold">데이터 수신 처리 중입니다...</td></tr>';
                 summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
                 
                 try {
@@ -293,10 +295,6 @@ def render_portal_ui():
                 fetch('/api/pending/export-plan-excel', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false)) })
                 .then(res => res.blob()).then(blob => { const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서.xlsx`; a.click(); });
             }
-            function downloadEdmZip() {
-                fetch('/api/pending/export-edm-zip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false)) })
-                .then(res => res.blob()).then(blob => { const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `EDM_증빙자료.zip`; a.click(); });
-            }
             window.onload = function() { loadPendingData(false); };
         </script>
     </body>
@@ -326,19 +324,3 @@ def export_plan_excel(payload: PendingSearchQuery):
         ws.append([row["scheduled_payment_date"], row["pending_no"], row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
     stream = io.BytesIO(); wb.save(stream); stream.seek(0)
     return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Payment_Plan.xlsx"})
-
-@app.post("/api/pending/export-edm-zip")
-def export_edm_zip(payload: PendingSearchQuery):
-    filtered_data = filter_data(payload, get_mock_pending_data() if payload.use_mock else fetch_real_pending_data(payload))
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-        counter = 1
-        for item in filtered_data:
-            if item.get("error_msg"): continue
-            for doc in item.get("edm_documents", []):
-                dummy_content = f"이 파일은 {item['vendor_name']} 업체의 증빙 문서입니다.\n미결번호: {item['pending_no']}\n원화잔액: {item['krw_balance']}원".encode('utf-8')
-                new_filename = f"{counter}_{item['vendor_name'].replace('/', '_')}_{doc['doc_type']}.pdf"
-                zip_file.writestr(new_filename, dummy_content)
-                counter += 1
-    zip_buffer.seek(0)
-    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=EDM_Documents.zip"})
