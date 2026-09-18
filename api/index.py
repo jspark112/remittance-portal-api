@@ -12,16 +12,17 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 및 스펙 스캐너(Inspector) 탑재 포털 API",
-    version="4.5.1",
+    description="SamsApi 실시간 연동 포털 API (도메인 주소 강제 고정 완료)",
+    version="6.0.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수 (SamsApi 접속 정보 및 API Key)
+# 🚨 환경 변수 강제 고정 (Vercel 설정 무시) 🚨
 # ---------------------------------------------------------
-SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
+# os.getenv를 제거하여 무조건 아래 주소만 바라보게 강제합니다.
+SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
 SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
 
 # ---------------------------------------------------------
@@ -76,7 +77,6 @@ class PendingSearchQuery(BaseModel):
     pending_no: Optional[str] = None
     unsettled_only: bool = True
     use_mock: Optional[bool] = False
-    custom_api_url: Optional[str] = None
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
@@ -88,43 +88,22 @@ class PaymentDateSaveRequest(BaseModel):
 def get_mock_pending_data() -> List[dict]:
     items = [
         {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607010005-0006", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003081", "vendor_name": "(주)매일마린", "occur_date": "2026-06-05", "acc_date": "2026-06-16", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 22706640.00, "balance_amount": 22706640.00, "krw_balance": 22706640.0, "confirmed_voucher_no": "VC20260616-0089", "edm_documents": [{"doc_id": "EDM-3", "doc_type": "세금계산서", "file_name": "MM_Tax.pdf", "download_url": "#"}]}
+        {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
-        item["auto_payment_date"] = auto_date
-        item["scheduled_payment_date"] = auto_date
+        item["auto_payment_date"] = auto_date; item["scheduled_payment_date"] = auto_date
     return items
 
 # ---------------------------------------------------------
-# SamsApi 실시간 연동 Engine (자동 경로 탐색 포함)
+# SamsApi 실시간 연동 (404 회피를 위한 경로 다중 스캔)
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
-    headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
+    headers = {
+        "X-API-Key": SAMSAPI_KEY,
+        "Content-Type": "application/json"
+    }
     
-    candidates = []
-    if payload.custom_api_url and payload.custom_api_url.strip() != "":
-        candidates.append(payload.custom_api_url.strip())
-    else:
-        # 자동 경로 탐색 시도
-        try:
-            spec_res = requests.get(f"{SAMSAPI_BASE_URL}/openapi.json?domain=accounting", headers={"X-API-Key": SAMSAPI_KEY}, timeout=3)
-            if spec_res.status_code == 200:
-                paths = spec_res.json().get("paths", {})
-                for path in paths.keys():
-                    if "ntstl/list" in path:
-                        candidates.append(f"{SAMSAPI_BASE_URL}{path}")
-        except Exception:
-            pass
-            
-        # 기본 후보 경로 설정
-        if not candidates:
-            candidates = [
-                f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
-                f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
-            ]
-
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     req_body = {
         "company_code": "01",
@@ -133,13 +112,20 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
 
+    # API 서버의 실제 경로 후보군
+    candidates = [
+        f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
+        f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
+        f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list"
+    ]
+
     last_error_msg = ""
     for api_url in candidates:
         try:
-            res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
+            res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=8)
             
             if res.status_code == 404:
-                last_error_msg = f"HTTP 404 (등록된 API 없음) - 주소: {api_url}"
+                last_error_msg = f"HTTP 404 (경로 없음) - 주소: {api_url}"
                 continue
                 
             if res.status_code == 200:
@@ -161,7 +147,6 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                             try: return float(val) if val else 0.0
                             except: return 0.0
 
-                        # API 스펙에 맞게 필드명 유연하게 처리
                         balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
                         krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
                         
@@ -169,27 +154,38 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                             
                         auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
                         parsed_items.append({
-                            "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                            "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": format_date(raw.get("from_date", "")),
-                            "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                            "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                            "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                            "pending_no": pending_no,
+                            "account_code": raw.get("account_code", ""),
+                            "account_name": raw.get("account_name", ""),
+                            "vendor_code": raw.get("customer_code", ""),
+                            "vendor_name": vendor_name,
+                            "occur_date": occur_date,
+                            "acc_date": format_date(raw.get("from_date", "")),
+                            "payment_request_date": due_date,
+                            "currency": raw.get("currency_code", "KRW"),
+                            "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                            "occur_amount": parse_float(raw.get("occur_amount_ocr")),
+                            "balance_amount": balance_amount,
+                            "krw_balance": krw_balance,
+                            "auto_payment_date": auto_date,
+                            "scheduled_payment_date": auto_date,
+                            "confirmed_voucher_no": raw.get("group_settled_number", ""),
                             "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"{vendor_name}_증빙.pdf", "download_url": "#"}]
                         })
                     return parsed_items
                 else:
                     return [{"error_msg": f"API 응답 실패(200): {json_data.get('message')} - URL: {api_url}"}]
             else:
-                return [{"error_msg": f"인증/서버 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
+                return [{"error_msg": f"서버 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
                 
         except requests.exceptions.Timeout:
-            return [{"error_msg": f"연결 시간 초과 ({api_url})"}]
+            return [{"error_msg": f"연결 시간 초과 ({api_url}) - 방화벽(8400포트) 확인 필요"}]
         except requests.exceptions.ConnectionError:
-            return [{"error_msg": f"접속 거부 ({api_url})"}]
+            return [{"error_msg": f"접속 거부 ({api_url}) - 서버가 죽어있거나 방화벽 차단 상태"}]
         except Exception as e:
             last_error_msg = str(e)
             
-    return [{"error_msg": last_error_msg or "올바른 경로를 찾지 못했습니다. 'SAMSAPI 등록 경로 전체 스캔' 버튼을 사용해보세요."}]
+    return [{"error_msg": last_error_msg or "올바른 경로를 찾지 못했습니다."}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -199,34 +195,6 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if payload.pay_end_date and payload.pay_end_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] <= payload.pay_end_date]
     if payload.pending_no and payload.pending_no.strip() not in ["", "string"]: data = [item for item in data if item["pending_no"] == payload.pending_no]
     return data
-
-# ---------------------------------------------------------
-# SAMSAPI 스펙(openapi.json) 스캐너 엔드포인트
-# ---------------------------------------------------------
-@app.get("/api/pending/inspect-spec")
-def inspect_samsapi_spec():
-    headers = {"X-API-Key": SAMSAPI_KEY}
-    spec_urls = [
-        f"{SAMSAPI_BASE_URL}/openapi.json?domain=accounting",
-        f"{SAMSAPI_BASE_URL}/openapi.json?domain=all",
-        f"{SAMSAPI_BASE_URL}/openapi.json"
-    ]
-    
-    found_paths = []
-    
-    for url in spec_urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code == 200:
-                paths = res.json().get("paths", {})
-                for p in paths.keys():
-                    found_paths.append(p)
-                if found_paths:
-                    return {"status": "success", "source_url": url, "paths": found_paths}
-        except Exception:
-             pass
-             
-    return {"status": "fail", "message": f"SAMSAPI 서버({SAMSAPI_BASE_URL})에서 openapi.json 스펙을 읽지 못했습니다. 경로가 다르거나 방화벽 차단일 수 있습니다.", "paths": []}
 
 # ---------------------------------------------------------
 # 사용자 포털 UI HTML
@@ -254,28 +222,9 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-info text-dark fs-6 ms-2">스펙 Inspector 🔍</span></span>
-            <button class="btn btn-warning fw-bold btn-sm" onclick="inspectSamsapiSpec()">🔍 SAMSAPI 등록 경로 전체 스캔</button>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">samsapi 고정 연동 🟢</span></span>
         </nav>
         
-        <!-- 디버그 전용 URL 테스트 UI -->
-        <div class="card p-3 mb-4 border-primary">
-            <h5 class="fw-bold text-primary mb-3">🛠 API 호출 커스텀 테스트</h5>
-            <div class="input-group">
-                <span class="input-group-text bg-primary text-white fw-bold">API 주소</span>
-                <input type="text" class="form-control" id="customApiUrl" value="" placeholder="스캔 결과에 나온 실제 주소를 선택하거나 직접 입력하세요">
-                <button class="btn btn-primary fw-bold" onclick="loadPendingData(false)">실시간 API 조회</button>
-                <button class="btn btn-mock fw-bold" onclick="loadPendingData(true)">MOCK 복귀</button>
-            </div>
-            <!-- 스펙 스캔 결과 표시 창 -->
-            <div id="specInspectResult" class="mt-3 d-none">
-                <div class="alert alert-dark mb-0">
-                    <h6 class="fw-bold text-warning">📌 SAMSAPI 서버 등록 경로 스캔 결과 (클릭 시 자동 입력됨):</h6>
-                    <ul id="pathList" class="mb-0 font-monospace small"></ul>
-                </div>
-            </div>
-        </div>
-
         <div class="card p-3 mb-4">
             <h5 class="fw-bold text-secondary mb-3">🔍 미결 조회 조건 (미상계건 대상)</h5>
             <div class="row g-3">
@@ -307,6 +256,16 @@ def render_portal_ui():
                 <div class="col-md-2">
                     <label class="form-label text-secondary fw-bold">거래처코드</label>
                     <input type="text" class="form-control" id="vendorCode" placeholder="코드 입력">
+                </div>
+            </div>
+            
+            <div class="row g-3 mt-2">
+                <div class="col-md-6"></div>
+                <div class="col-md-6 d-flex align-items-end gap-2">
+                    <button class="btn btn-mock fw-bold flex-fill" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
+                    <button class="btn btn-primary fw-bold flex-fill" onclick="loadPendingData(false)">조회(API)</button>
+                    <button class="btn btn-excel fw-bold flex-fill" onclick="downloadExcel()">엑셀(계획)</button>
+                    <button class="btn btn-zip fw-bold flex-fill" onclick="downloadEdmZip()">증빙 ZIP</button>
                 </div>
             </div>
         </div>
@@ -360,32 +319,6 @@ def render_portal_ui():
         </div>
 
         <script>
-            async function inspectSamsapiSpec() {
-                const resBox = document.getElementById("specInspectResult");
-                const pathList = document.getElementById("pathList");
-                resBox.classList.remove("d-none");
-                pathList.innerHTML = "<li>SAMSAPI 서버 스펙 로딩 중...</li>";
-                
-                try {
-                    const res = await fetch('/api/pending/inspect-spec');
-                    const json = await res.json();
-                    pathList.innerHTML = "";
-                    
-                    if(json.paths && json.paths.length > 0) {
-                        json.paths.forEach(p => {
-                            const li = document.createElement("li");
-                            const fullUrl = `http://211.104.10.171:7071${p}`;
-                            li.innerHTML = `<a href="#" class="text-warning text-decoration-none" onclick="document.getElementById('customApiUrl').value='${fullUrl}'; return false;">${fullUrl}</a>`;
-                            pathList.appendChild(li);
-                        });
-                    } else {
-                        pathList.innerHTML = `<li class="text-danger">${json.message || '등록된 API 경로를 찾지 못했습니다.'}</li>`;
-                    }
-                } catch(e) {
-                    pathList.innerHTML = `<li class="text-danger">스캔 오류: ${e.message}</li>`;
-                }
-            }
-
             function buildSearchPayload(useMock = false) {
                 return {
                     branch_code: "본사",
@@ -396,8 +329,7 @@ def render_portal_ui():
                     account_code: document.getElementById("accountCode").value,
                     vendor_code: document.getElementById("vendorCode").value,
                     unsettled_only: true,
-                    use_mock: useMock,
-                    custom_api_url: document.getElementById("customApiUrl") ? document.getElementById("customApiUrl").value : null
+                    use_mock: useMock
                 };
             }
 
@@ -406,7 +338,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 데이터 수신 중...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 데이터 연동 중입니다...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -418,13 +350,7 @@ def render_portal_ui():
                     });
 
                     const text = await res.text();
-                    let data;
-                    try {
-                        data = JSON.parse(text);
-                    } catch (parseErr) {
-                        tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 서버 연결 실패 : ${text.substring(0,50)}...</td></tr>`;
-                        return;
-                    }
+                    let data = JSON.parse(text);
                     
                     if(data.length > 0 && data[0].error_msg) {
                          tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 ${data[0].error_msg}</td></tr>`;
@@ -500,7 +426,7 @@ def render_portal_ui():
             }
 
             window.onload = function() {
-                loadPendingData(true); // 페이지 로드 시 기본 MOCK 데이터 바인딩
+                loadPendingData(false); // 페이지 로드 시 바로 API 조회 실행
             };
         </script>
     </body>
