@@ -12,14 +12,14 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 미결 지불관리 포털 API (경로 테스터 탑재)",
-    version="4.3.0",
+    description="SamsApi 표준 규격 연동 미결 지불관리 포털 API",
+    version="4.4.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수 설정
+# 환경 변수 (SamsApi 접속 정보 및 API Key)
 # ---------------------------------------------------------
 SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
 SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
@@ -76,14 +76,14 @@ class PendingSearchQuery(BaseModel):
     pending_no: Optional[str] = None
     unsettled_only: bool = True
     use_mock: Optional[bool] = False
-    custom_api_url: Optional[str] = None  # UI에서 직접 입력받은 URL
+    custom_api_url: Optional[str] = None
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
     target_payment_date: str
 
 # ---------------------------------------------------------
-# Mock 데이터 생성
+# Mock 데이터
 # ---------------------------------------------------------
 def get_mock_pending_data() -> List[dict]:
     items = [
@@ -98,49 +98,58 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SamsApi 실시간 연동 (다중 경로 스캐닝 및 커스텀 URL 적용)
+# SamsApi 카탈로그 스펙 수신 및 실시간 연동 Engine
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
-    target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     
+    # 1. UI 사용자 직접 지정 URL 우선 적용
+    if payload.custom_api_url and payload.custom_api_url.strip() != "":
+        candidates = [payload.custom_api_url.strip()]
+    else:
+        candidates = []
+        # 2. SamsApi 표준 매뉴얼 절차: accounting 도메인 스펙 실시간 탐색 (GET /openapi.json?domain=accounting)
+        spec_urls = [
+            f"{SAMSAPI_BASE_URL}/openapi.json?domain=accounting",
+            f"{SAMSAPI_BASE_URL}/openapi.json"
+        ]
+        
+        for spec_url in spec_urls:
+            try:
+                spec_res = requests.get(spec_url, headers=headers, timeout=3)
+                if spec_res.status_code == 200:
+                    paths = spec_res.json().get("paths", {})
+                    for path in paths.keys():
+                        if "ntstl" in path:
+                            candidates.append(f"{SAMSAPI_BASE_URL}{path}")
+                            break
+                if candidates: break
+            except Exception:
+                pass
+                
+        # 기본 후보군 추가
+        candidates.extend([
+            f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
+            f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
+            f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list"
+        ])
+
+    target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     req_body = {
         "company_code": "01",
         "target_date": target_dt.replace("-", ""),
         "type_account_code": [payload.account_code] if payload.account_code and payload.account_code not in ["", "string", "ALL"] else [],
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
-    
-    # UI에서 사용자가 직접 입력한 주소가 있다면 그 주소만 단독으로 테스트
-    if payload.custom_api_url and payload.custom_api_url.strip() != "":
-        candidates = [payload.custom_api_url.strip()]
-    else:
-        candidates = [
-            f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
-            f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list",
-            f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
-            f"{SAMSAPI_BASE_URL}/sams/api/v1/ntstl/list"
-        ]
-        # Auto-Discovery (API Key 헤더 추가!)
-        try:
-            spec_res = requests.get(f"{SAMSAPI_BASE_URL}/openapi.json", headers=headers, timeout=3)
-            if spec_res.status_code == 200:
-                for path in spec_res.json().get("paths", {}).keys():
-                    if "ntstl" in path:
-                        candidates.insert(0, f"{SAMSAPI_BASE_URL}{path}")
-                        break
-        except Exception:
-            pass
 
     last_error_msg = ""
-    
     for api_url in candidates:
         try:
             res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
             
             if res.status_code == 404:
-                last_error_msg = f"엔드포인트 호출 오류 (HTTP 404) - 시도한 주소: {api_url}"
-                continue # 404면 다음 주소로 넘어감
+                last_error_msg = f"HTTP 404 (등록된 API 없음) - 주소: {api_url}"
+                continue
                 
             if res.status_code == 200:
                 json_data = res.json()
@@ -177,18 +186,18 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                         })
                     return parsed_items
                 else:
-                    return [{"error_msg": f"API 응답 실패(200): {json_data.get('message')} - 탐색된 URL: {api_url}"}]
+                    return [{"error_msg": f"API 실패(200): {json_data.get('message')} - URL: {api_url}"}]
             else:
-                return [{"error_msg": f"인증/권한 에러 (HTTP {res.status_code}) - 탐색된 URL: {api_url}"}]
+                return [{"error_msg": f"인증/서버 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
                 
         except requests.exceptions.Timeout:
-            return [{"error_msg": f"사내 API 연결 시간 초과 ({api_url})"}]
+            return [{"error_msg": f"연결 시간 초과 ({api_url})"}]
         except requests.exceptions.ConnectionError:
-            return [{"error_msg": f"사내 API 서버 접속 거부 ({api_url})"}]
+            return [{"error_msg": f"접속 거부 (IIS/방화벽 확인 필요: {api_url})"}]
         except Exception as e:
             last_error_msg = str(e)
             
-    return [{"error_msg": last_error_msg or "모든 경로 탐색 실패 (404)."}]
+    return [{"error_msg": last_error_msg or "SamsApi 도메인 경로 탐색 실패 (404)"}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -200,7 +209,7 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     return data
 
 # ---------------------------------------------------------
-# 포털 대시보드 사용자 UI HTML
+# 사용자 포털 UI HTML
 # ---------------------------------------------------------
 @app.get("/portal", response_class=HTMLResponse, tags=["0. 사용자 포털 UI"])
 def render_portal_ui():
@@ -225,19 +234,17 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-warning text-dark fs-6 ms-2">디버깅 모드 탑재 🟡</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">SamsApi 표준 연동 🟢</span></span>
         </nav>
         
-        <!-- 디버그 전용 URL 테스트 UI -->
-        <div class="card p-3 mb-4 border-danger">
-            <h5 class="fw-bold text-danger mb-3">🛠 실시간 API 경로 찔러보기 (404 에러 해결용)</h5>
+        <div class="card p-3 mb-4 border-primary">
+            <h5 class="fw-bold text-primary mb-3">🛠 API 호출 커스텀 테스트</h5>
             <div class="input-group">
-                <span class="input-group-text bg-danger text-white fw-bold">테스트 API 주소</span>
-                <input type="text" class="form-control" id="customApiUrl" value="http://211.104.10.171:7071/api/v1/ntstl/list" placeholder="여기에 사내망 정확한 주소를 입력하세요">
-                <button class="btn btn-primary fw-bold" onclick="loadPendingData(false)">이 주소로 조회(API)</button>
+                <span class="input-group-text bg-primary text-white fw-bold">API 주소</span>
+                <input type="text" class="form-control" id="customApiUrl" value="" placeholder="자동 탐색 미사용 시 입력 (예: http://211.104.10.171:7071/accounting/api/v1/ntstl/list)">
+                <button class="btn btn-primary fw-bold" onclick="loadPendingData(false)">실시간 API 조회</button>
                 <button class="btn btn-mock fw-bold" onclick="loadPendingData(true)">MOCK 복귀</button>
             </div>
-            <small class="text-muted mt-2">※ 중간 경로가 빠진 것 같습니다. <b>/sams/api/...</b> 또는 <b>/accounting/api/...</b> 처럼 주소를 조금씩 바꿔가며 찔러보세요!</small>
         </div>
 
         <div class="card p-3 mb-4">
@@ -344,7 +351,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">API 통신 처리 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 스펙 분석 및 처리 중...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -356,21 +363,15 @@ def render_portal_ui():
                     });
 
                     const text = await res.text();
-                    let data;
-                    try {
-                        data = JSON.parse(text);
-                    } catch (parseErr) {
-                        tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 서버 연결 실패 : ${text.substring(0,50)}...</td></tr>`;
-                        return;
-                    }
+                    let data = JSON.parse(text);
                     
                     if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [에러 발생] ${data[0].error_msg}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 ${data[0].error_msg}</td></tr>`;
                          return;
                     }
                     
                     if(data.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조건에 해당하는 미상계 데이터가 없습니다. (해당 주소 호출은 성공함!)</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조건에 해당하는 미상계 데이터가 없습니다.</td></tr>';
                         return;
                     }
 
@@ -407,7 +408,7 @@ def render_portal_ui():
                     }
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
                 } catch(e) {
-                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 스크립트 오류: ${e.message}</td></tr>`;
+                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 오류 발생: ${e.message}</td></tr>`;
                 }
             }
 
@@ -422,7 +423,7 @@ def render_portal_ui():
             }
 
             window.onload = function() {
-                document.getElementById("pendingTableBody").innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">테스트 API 주소를 입력 후 버튼을 눌러보세요.</td></tr>';
+                loadPendingData(true); // 페이지 로드 시 기본 MOCK 데이터 바인딩
             };
         </script>
     </body>
