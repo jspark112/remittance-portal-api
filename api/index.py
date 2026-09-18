@@ -2,9 +2,8 @@ import io
 import os
 import requests
 import zipfile
-import traceback
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -13,8 +12,8 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (에러 디버깅 및 MOCK 지원)",
-    version="3.2.0",
+    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (에러 처리 완벽 보완)",
+    version="3.3.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
@@ -79,48 +78,21 @@ class PendingSearchQuery(BaseModel):
     vendor_code: Optional[str] = None
     pending_no: Optional[str] = None
     unsettled_only: bool = True
-    use_mock: Optional[bool] = False # Mock 데이터 사용 여부 플래그
+    use_mock: Optional[bool] = False
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
     target_payment_date: str
 
-class EdmDocumentInfo(BaseModel):
-    doc_id: str
-    doc_type: str
-    file_name: str
-    download_url: str
-
-class PendingPaymentItem(BaseModel):
-    pending_no: str
-    account_code: str
-    account_name: str
-    vendor_code: str
-    vendor_name: str
-    occur_date: str
-    acc_date: str
-    payment_request_date: Optional[str] = None
-    currency: str
-    exchange_rate: float
-    occur_amount: float
-    balance_amount: float
-    krw_balance: float
-    auto_payment_date: str
-    scheduled_payment_date: str
-    confirmed_voucher_no: str
-    edm_documents: List[EdmDocumentInfo] = []
-    error_msg: Optional[str] = None # 에러 메시지 전달용 필드
-
 # ---------------------------------------------------------
-# Mock 데이터
+# Mock 데이터 생성
 # ---------------------------------------------------------
 def get_mock_pending_data() -> List[dict]:
     items = [
         {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
         {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]},
         {"pending_no": "APS202607010005-0006", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003081", "vendor_name": "(주)매일마린", "occur_date": "2026-06-05", "acc_date": "2026-06-16", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 22706640.00, "balance_amount": 22706640.00, "krw_balance": 22706640.0, "confirmed_voucher_no": "VC20260616-0089", "edm_documents": [{"doc_id": "EDM-3", "doc_type": "세금계산서", "file_name": "MM_Tax.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607150012-0001", "account_code": "2041", "account_name": "미지급금", "vendor_code": "003120", "vendor_name": "세연테크", "occur_date": "2026-07-10", "acc_date": "2026-07-15", "payment_request_date": "2026-08-20", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 3450000.00, "balance_amount": 3450000.00, "krw_balance": 3450000.0, "confirmed_voucher_no": "VC20260715-0004", "edm_documents": [{"doc_id": "EDM-4", "doc_type": "세금계산서", "file_name": "Seyeon_Tax.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202608050003-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "002881", "vendor_name": "비아이산업주식회사", "occur_date": "2026-08-01", "acc_date": "2026-08-05", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 12500000.00, "balance_amount": 12500000.00, "krw_balance": 12500000.0, "confirmed_voucher_no": "VC20260805-0021", "edm_documents": [{"doc_id": "EDM-5", "doc_type": "세금계산서", "file_name": "BI_Tax.pdf", "download_url": "#"}]}
+        {"pending_no": "APS202607150012-0001", "account_code": "2041", "account_name": "미지급금", "vendor_code": "003120", "vendor_name": "세연테크", "occur_date": "2026-07-10", "acc_date": "2026-07-15", "payment_request_date": "2026-08-20", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 3450000.00, "balance_amount": 3450000.00, "krw_balance": 3450000.0, "confirmed_voucher_no": "VC20260715-0004", "edm_documents": [{"doc_id": "EDM-4", "doc_type": "세금계산서", "file_name": "Seyeon_Tax.pdf", "download_url": "#"}]}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -129,7 +101,7 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SAMSAPI 실시간 연동 핵심 로직
+# SAMSAPI 실시간 연동 및 에러 방어 로직
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     api_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
@@ -150,13 +122,13 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     parsed_items = []
     
     try:
-        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5) # 타임아웃 5초 설정
+        # 타임아웃 5초 지정 (방화벽 차단 시 무한 대기 방지)
+        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
         
         if res.status_code == 200:
             json_data = res.json()
             if json_data.get("success"):
                 raw_list = json_data.get("data", [])
-                
                 for raw in raw_list:
                     pending_no = raw.get("not_settled_number", "")
                     vendor_name = raw.get("customer_name", "")
@@ -205,16 +177,14 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         else:
              return [{"error_msg": f"서버 통신 오류 (HTTP {res.status_code})"}]
     except requests.exceptions.Timeout:
-         return [{"error_msg": "API 연결 시간 초과 (방화벽 또는 VPN 확인 필요)"}]
+         return [{"error_msg": "사내 API 연결 시간 초과 (Vercel에서 사내 방화벽 7071 포트 접근이 차단되었는지 확인하세요)"}]
     except requests.exceptions.ConnectionError:
-         return [{"error_msg": "API 서버 접속 실패 (방화벽 차단 또는 IP 확인 필요)"}]
+         return [{"error_msg": "사내 API 서버 접속 실패 (방화벽 차단 또는 IP가 외부망에서 접근 불가능함)"}]
     except Exception as e:
          return [{"error_msg": f"예기치 않은 오류 발생: {str(e)}"}]
 
-    return parsed_items
-
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
-    # 에러 메시지가 포함된 객체인 경우 바로 반환
+    # 에러 메시지 객체는 필터링 패스
     if data and data[0].get("error_msg"):
         return data
 
@@ -251,10 +221,9 @@ def render_portal_ui():
             .table-header { background-color: #2b4c7e; color: white; }
             .btn-excel { background-color: #1d6f42; color: white; }
             .btn-zip { background-color: #6f42c1; color: white; }
-            .btn-zip:hover { background-color: #59359a; color: white; }
+            .btn-mock { background-color: #6c757d; color: white; border-color: #6c757d; }
             .bg-summary { background-color: #fffbeb; }
             .date-input { background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold;}
-            .btn-mock { background-color: #6c757d; color: white; border-color: #6c757d; }
         </style>
     </head>
     <body class="p-3">
@@ -299,7 +268,7 @@ def render_portal_ui():
             <div class="row g-3 mt-2">
                 <div class="col-md-6"></div>
                 <div class="col-md-6 d-flex align-items-end gap-2">
-                    <button class="btn btn-mock fw-bold flex-fill" onclick="loadPendingData(true)">MOCK데이터조회(테스트)</button>
+                    <button class="btn btn-mock fw-bold flex-fill" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                     <button class="btn btn-primary fw-bold flex-fill" onclick="loadPendingData(false)">조회(API)</button>
                     <button class="btn btn-excel fw-bold flex-fill" onclick="downloadExcel()">엑셀(계획)</button>
                     <button class="btn btn-zip fw-bold flex-fill" onclick="downloadEdmZip()">증빙 ZIP</button>
@@ -375,7 +344,10 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
+                // 조회 누르면 하단 요약표부터 초기화
                 tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터를 불러오는 중입니다...</td></tr>';
+                summaryBody.innerHTML = "";
+                document.getElementById("grandTotalKrw").innerText = "0 원";
                 
                 try {
                     const res = await fetch('/api/pending/search-and-schedule', {
@@ -383,19 +355,22 @@ def render_portal_ui():
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(payload)
                     });
+                    
+                    if (!res.ok) {
+                        throw new Error(`서버 내부 에러 (HTTP ${res.status})`);
+                    }
+
                     const data = await res.json();
+                    tbody.innerHTML = ""; 
                     
-                    tbody.innerHTML = ""; summaryBody.innerHTML = "";
-                    
+                    // 백엔드에서 전달한 명시적 에러 메시지가 있을 경우
                     if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">통신 에러: ${data[0].error_msg}</td></tr>`;
-                         document.getElementById("grandTotalKrw").innerText = "0 원";
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [접속 에러] ${data[0].error_msg}</td></tr>`;
                          return;
                     }
                     
                     if(data.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-danger fw-bold">검색 조건에 해당하거나 미상계된 데이터가 없습니다.</td></tr>';
-                        document.getElementById("grandTotalKrw").innerText = "0 원";
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조건에 해당하는 미상계 데이터가 없습니다.</td></tr>';
                         return;
                     }
 
@@ -431,8 +406,7 @@ def render_portal_ui():
                     }
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
                 } catch(e) {
-                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">API 호출 중 에러 발생: ${e.message}</td></tr>`;
-                     document.getElementById("grandTotalKrw").innerText = "0 원";
+                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 화면 로딩 오류: ${e.message}</td></tr>`;
                 }
             }
 
@@ -463,8 +437,8 @@ def render_portal_ui():
             }
 
             window.onload = function() {
-                // 페이지 로드 시 Mock 데이터로 임시 조회하여 화면 확인 가능하게 함
-                loadPendingData(true);
+                // 첫 진입시 초기화
+                document.getElementById("pendingTableBody").innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>';
             };
         </script>
     </body>
@@ -472,12 +446,13 @@ def render_portal_ui():
     """
 
 # ---------------------------------------------------------
-# API 엔드포인트 구현
+# API 엔드포인트 구현 
+# ※ response_model을 제거하여 동적 에러 메시지(dict)가 그대로 JSON으로 반환되도록 수정
 # ---------------------------------------------------------
 @app.get("/")
 def read_root(): return {"status": "online"}
 
-@app.post("/api/pending/search-and-schedule", response_model=List[PendingPaymentItem])
+@app.post("/api/pending/search-and-schedule")
 def search_and_schedule_pending(payload: PendingSearchQuery):
     if payload.use_mock:
          raw_data = get_mock_pending_data()
@@ -498,6 +473,7 @@ def export_plan_excel(payload: PendingSearchQuery):
     
     summary = {}; grand_krw = 0
     for row in filtered_data:
+        if row.get("error_msg"): continue # 에러 데이터는 엑셀 제외
         ws.append([row["scheduled_payment_date"], row["pending_no"], row["account_code"], row["account_name"], row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
         curr = row["currency"]
         if curr not in summary: summary[curr] = {"orig": 0, "krw": 0}
@@ -519,7 +495,8 @@ def export_edm_zip(payload: PendingSearchQuery):
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
         for item in filtered_data:
-            for doc in item["edm_documents"]:
+            if item.get("error_msg"): continue
+            for doc in item.get("edm_documents", []):
                 dummy_content = f"이 파일은 {item['vendor_name']} 업체의 증빙 문서입니다.\n미결번호: {item['pending_no']}\n원화잔액: {item['krw_balance']}원".encode('utf-8')
                 new_filename = f"{counter}_{item['vendor_name'].replace('/', '_')}_{doc['doc_type']}.pdf"
                 zip_file.writestr(new_filename, dummy_content)
