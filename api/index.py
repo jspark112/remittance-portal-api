@@ -11,7 +11,7 @@ from openpyxl.styles import Font, Alignment, PatternFill
 app = FastAPI(
     title="Remittance Portal API",
     description="미결 지불예정일(정기물품대/금액별) 자동산정, 단건조회/저장, EDM증빙 및 엑셀 다운로드 API",
-    version="1.5.0",
+    version="1.5.1",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
@@ -174,8 +174,11 @@ def read_root():
 @app.post("/api/pending/search-and-schedule", response_model=List[PendingPaymentItem])
 def search_and_schedule_pending(payload: PendingSearchQuery):
     data = get_mock_pending_data()
-    if payload.pending_no:
+    # Swagger 기본 입력값 "string" 및 공백 필터 예외 처리
+    if payload.pending_no and payload.pending_no.strip() not in ["", "string"]:
         data = [item for item in data if item["pending_no"] == payload.pending_no]
+    if payload.vendor_code and payload.vendor_code.strip() not in ["", "string"]:
+        data = [item for item in data if item["vendor_code"] == payload.vendor_code]
     return data
 
 # 2. 특정 미결번호 단건 상세 조회 API
@@ -203,8 +206,11 @@ def save_payment_date(payload: PaymentDateSaveRequest):
 @app.post("/api/pending/export-excel")
 def export_pending_to_excel(payload: PendingSearchQuery):
     data = get_mock_pending_data()
-    if payload.pending_no:
+    # Swagger 기본 입력값 "string" 및 공백 필터 예외 처리
+    if payload.pending_no and payload.pending_no.strip() not in ["", "string"]:
         data = [item for item in data if item["pending_no"] == payload.pending_no]
+    if payload.vendor_code and payload.vendor_code.strip() not in ["", "string"]:
+        data = [item for item in data if item["vendor_code"] == payload.vendor_code]
 
     wb = openpyxl.Workbook()
     ws = wb.active
