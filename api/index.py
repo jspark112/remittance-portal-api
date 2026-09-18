@@ -2,7 +2,6 @@ import io
 import os
 import requests
 import zipfile
-import traceback
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Response
@@ -13,20 +12,20 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (에러 방어 100% 보완)",
-    version="4.0.0",
+    description="SamsApi 자동 경로 탐색(Auto-Discovery) 탑재 실시간 미결 포털 API",
+    version="4.1.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수 설정
+# 환경 변수 (SamsApi 접속 정보 및 API Key)
 # ---------------------------------------------------------
 SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
 SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
 
 # ---------------------------------------------------------
-# 지불 정책 Engine
+# 지불 정책 Engine (정기물품대 29개사 및 금액별 유예)
 # ---------------------------------------------------------
 REGULAR_SUPPLIERS = {
     "한라시스템", "해동구명설비(주)", "한라레벨(주)-한라IMS(주)", "정양엔지니어링",
@@ -83,7 +82,7 @@ class PaymentDateSaveRequest(BaseModel):
     target_payment_date: str
 
 # ---------------------------------------------------------
-# Mock 데이터 생성 (테스트용)
+# Mock 데이터 (테스트용)
 # ---------------------------------------------------------
 def get_mock_pending_data() -> List[dict]:
     items = [
@@ -99,11 +98,41 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SAMSAPI 실시간 연동 로직
+# SamsApi 자동 경로 탐색 (Auto-Discovery Engine)
+# ---------------------------------------------------------
+def discover_samsapi_url() -> str:
+    """SamsApi의 /openapi.json을 읽어 ntstl 목록 조회의 정확한 경로를 탐색"""
+    candidates = [
+        "/api/v1/ntstl/list",
+        "/api/v1/accounting/ntstl/list",
+        "/accounting/api/v1/ntstl/list",
+        "/api/v1/acct/ntstl/list"
+    ]
+    try:
+        # SamsApi openapi.json 스펙 수신
+        spec_res = requests.get(f"{SAMSAPI_BASE_URL}/openapi.json", timeout=3)
+        if spec_res.status_code == 200:
+            paths = spec_res.json().get("paths", {})
+            for path in paths.keys():
+                if "ntstl" in path:
+                    return f"{SAMSAPI_BASE_URL}{path}"
+    except Exception:
+        pass
+    
+    # openapi.json 수신 실패 시 기본 후보 경로 사용
+    return f"{SAMSAPI_BASE_URL}{candidates[0]}"
+
+# ---------------------------------------------------------
+# SamsApi 실시간 연동 로직
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
-    api_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
-    headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
+    # 1. 동적 경로 자동 바인딩
+    api_url = discover_samsapi_url()
+    
+    headers = {
+        "X-API-Key": SAMSAPI_KEY,
+        "Content-Type": "application/json"
+    }
     
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     req_body = {
@@ -153,9 +182,9 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
             else:
                  return [{"error_msg": f"API 응답 실패: {json_data.get('message')}"}]
         else:
-             return [{"error_msg": f"서버 통신 오류 (HTTP {res.status_code})"}]
+             return [{"error_msg": f"엔드포인트 호출 오류 (HTTP {res.status_code}) - 시도한 주소: {api_url}"}]
     except requests.exceptions.Timeout:
-         return [{"error_msg": "사내 API 연결 시간 초과 (방화벽 7071 포트가 Vercel 클라우드에서 접근 차단됨)"}]
+         return [{"error_msg": "사내 API 연결 시간 초과 (Vercel에서 사내 방화벽 7071 포트 접근이 차단됨)"}]
     except requests.exceptions.ConnectionError:
          return [{"error_msg": "사내 API 서버 접속 거부 (VPN/내부망 방화벽 차단 상태)"}]
     except Exception as e:
@@ -196,7 +225,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">API 연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">SamsApi 자동연동 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4">
@@ -312,7 +341,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터를 처리 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 스펙 분석 및 데이터 처리 중입니다...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -323,20 +352,17 @@ def render_portal_ui():
                         body: JSON.stringify(payload)
                     });
 
-                    // 1. 서버 응답을 우선 텍스트로 받아 에러 방어
                     const text = await res.text();
                     let data;
-                    
                     try {
                         data = JSON.parse(text);
                     } catch (parseErr) {
-                        tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 서버 연결 실패 (방화벽 차단 의심) : ${text.substring(0,50)}...</td></tr>`;
+                        tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 서버 연결 실패 : ${text.substring(0,50)}...</td></tr>`;
                         return;
                     }
                     
-                    // 2. 백엔드에서 넘겨준 커스텀 에러 메시지 검사
                     if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [통신 에러] ${data[0].error_msg}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 ${data[0].error_msg}</td></tr>`;
                          return;
                     }
                     
@@ -345,7 +371,6 @@ def render_portal_ui():
                         return;
                     }
 
-                    // 3. 정상 데이터 렌더링
                     let summary = {}; let grandTotalKrw = 0;
                     tbody.innerHTML = "";
 
@@ -379,7 +404,7 @@ def render_portal_ui():
                     }
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
                 } catch(e) {
-                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 화면 스크립트 오류: ${e.message}</td></tr>`;
+                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 오류 발생: ${e.message}</td></tr>`;
                 }
             }
 
@@ -418,7 +443,7 @@ def render_portal_ui():
     """
 
 # ---------------------------------------------------------
-# API 엔드포인트 구현 (모든 에러를 안전하게 catch 처리)
+# API 엔드포인트 구현
 # ---------------------------------------------------------
 @app.get("/")
 def read_root(): return {"status": "online"}
@@ -432,7 +457,7 @@ def search_and_schedule_pending(payload: PendingSearchQuery):
              raw_data = fetch_real_pending_data(payload)
         return filter_data(payload, raw_data)
     except Exception as e:
-        return [{"error_msg": f"백엔드 서버 처리 오류: {str(e)}"}]
+        return [{"error_msg": f"백엔드 처리 오류: {str(e)}"}]
 
 @app.post("/api/pending/save-payment-date")
 def save_payment_date(payload: PaymentDateSaveRequest):
