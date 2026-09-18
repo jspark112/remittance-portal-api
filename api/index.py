@@ -12,20 +12,20 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 자동 경로 탐색(Auto-Discovery) 탑재 실시간 미결 포털 API",
-    version="4.1.0",
+    description="SamsApi 실시간 연동 미결 지불관리 포털 API (경로 자동 스캐닝 탑재)",
+    version="4.2.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수 (SamsApi 접속 정보 및 API Key)
+# 환경 변수 설정
 # ---------------------------------------------------------
 SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
 SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
 
 # ---------------------------------------------------------
-# 지불 정책 Engine (정기물품대 29개사 및 금액별 유예)
+# 지불 정책 Engine
 # ---------------------------------------------------------
 REGULAR_SUPPLIERS = {
     "한라시스템", "해동구명설비(주)", "한라레벨(주)-한라IMS(주)", "정양엔지니어링",
@@ -82,7 +82,7 @@ class PaymentDateSaveRequest(BaseModel):
     target_payment_date: str
 
 # ---------------------------------------------------------
-# Mock 데이터 (테스트용)
+# Mock 데이터 생성 (테스트용)
 # ---------------------------------------------------------
 def get_mock_pending_data() -> List[dict]:
     items = [
@@ -98,43 +98,12 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SamsApi 자동 경로 탐색 (Auto-Discovery Engine)
-# ---------------------------------------------------------
-def discover_samsapi_url() -> str:
-    """SamsApi의 /openapi.json을 읽어 ntstl 목록 조회의 정확한 경로를 탐색"""
-    candidates = [
-        "/api/v1/ntstl/list",
-        "/api/v1/accounting/ntstl/list",
-        "/accounting/api/v1/ntstl/list",
-        "/api/v1/acct/ntstl/list"
-    ]
-    try:
-        # SamsApi openapi.json 스펙 수신
-        spec_res = requests.get(f"{SAMSAPI_BASE_URL}/openapi.json", timeout=3)
-        if spec_res.status_code == 200:
-            paths = spec_res.json().get("paths", {})
-            for path in paths.keys():
-                if "ntstl" in path:
-                    return f"{SAMSAPI_BASE_URL}{path}"
-    except Exception:
-        pass
-    
-    # openapi.json 수신 실패 시 기본 후보 경로 사용
-    return f"{SAMSAPI_BASE_URL}{candidates[0]}"
-
-# ---------------------------------------------------------
-# SamsApi 실시간 연동 로직
+# SamsApi 실시간 연동 (다중 경로 스캐닝 탑재)
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
-    # 1. 동적 경로 자동 바인딩
-    api_url = discover_samsapi_url()
-    
-    headers = {
-        "X-API-Key": SAMSAPI_KEY,
-        "Content-Type": "application/json"
-    }
-    
+    headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
+    
     req_body = {
         "company_code": "01",
         "target_date": target_dt.replace("-", ""),
@@ -142,53 +111,71 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
     
+    # OpenAPI 문서에서 파악한 회계(accounting) 도메인 규칙을 포함하여 404 회피를 위한 경로 스캐닝
+    candidates = [
+        f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list", # Oracle API 도메인 분리 권장 규격 1
+        f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list", # Oracle API 도메인 분리 권장 규격 2
+        f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",            # 기본형
+        f"{SAMSAPI_BASE_URL}/sams/api/v1/ntstl/list"        # 레거시(SAMS) 라우팅
+    ]
+    
     parsed_items = []
-    try:
-        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
-        
-        if res.status_code == 200:
-            json_data = res.json()
-            if json_data.get("success"):
-                raw_list = json_data.get("data", [])
-                for raw in raw_list:
-                    pending_no = raw.get("not_settled_number", "")
-                    vendor_name = raw.get("customer_name", "")
-                    
-                    def format_date(d_str):
-                        if d_str and len(d_str) == 8: return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
-                        return d_str
-                    occur_date = format_date(raw.get("occur_date", ""))
-                    due_date = format_date(raw.get("due_date", ""))
-                    
-                    def parse_float(val):
-                        try: return float(val) if val else 0.0
-                        except: return 0.0
-
-                    balance_amount = parse_float(raw.get("occur_amount_bal"))
-                    krw_balance = parse_float(raw.get("local_amount_bal"))
-                    
-                    if payload.unsettled_only and balance_amount <= 0: continue
+    last_error_msg = ""
+    
+    for api_url in candidates:
+        try:
+            res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
+            
+            if res.status_code == 404:
+                continue # 404(경로없음)이면 에러 내지 않고 다음 후보 주소로 즉시 재시도
+                
+            if res.status_code == 200:
+                json_data = res.json()
+                if json_data.get("success"):
+                    raw_list = json_data.get("data", [])
+                    for raw in raw_list:
+                        pending_no = raw.get("not_settled_number", "")
+                        vendor_name = raw.get("customer_name", "")
                         
-                    auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
-                    parsed_items.append({
-                        "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                        "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": format_date(raw.get("from_date", "")),
-                        "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                        "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
-                        "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"{vendor_name}_증빙.pdf", "download_url": "#"}]
-                    })
-                return parsed_items
+                        def format_date(d_str):
+                            if d_str and len(d_str) == 8: return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
+                            return d_str
+                        occur_date = format_date(raw.get("occur_date", ""))
+                        due_date = format_date(raw.get("due_date", ""))
+                        
+                        def parse_float(val):
+                            try: return float(val) if val else 0.0
+                            except: return 0.0
+
+                        balance_amount = parse_float(raw.get("occur_amount_bal"))
+                        krw_balance = parse_float(raw.get("local_amount_bal"))
+                        
+                        if payload.unsettled_only and balance_amount <= 0: continue
+                            
+                        auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
+                        parsed_items.append({
+                            "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                            "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": format_date(raw.get("from_date", "")),
+                            "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                            "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
+                            "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                            "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"{vendor_name}_증빙.pdf", "download_url": "#"}]
+                        })
+                    return parsed_items
+                else:
+                    return [{"error_msg": f"API 응답 실패(200): {json_data.get('message')} - 탐색된 URL: {api_url}"}]
             else:
-                 return [{"error_msg": f"API 응답 실패: {json_data.get('message')}"}]
-        else:
-             return [{"error_msg": f"엔드포인트 호출 오류 (HTTP {res.status_code}) - 시도한 주소: {api_url}"}]
-    except requests.exceptions.Timeout:
-         return [{"error_msg": "사내 API 연결 시간 초과 (Vercel에서 사내 방화벽 7071 포트 접근이 차단됨)"}]
-    except requests.exceptions.ConnectionError:
-         return [{"error_msg": "사내 API 서버 접속 거부 (VPN/내부망 방화벽 차단 상태)"}]
-    except Exception as e:
-         return [{"error_msg": f"오류 발생: {str(e)}"}]
+                return [{"error_msg": f"인증/권한 에러 (HTTP {res.status_code}) - 탐색된 URL: {api_url}"}]
+                
+        except requests.exceptions.Timeout:
+            return [{"error_msg": f"사내 API 연결 시간 초과 ({api_url})"}]
+        except requests.exceptions.ConnectionError:
+            return [{"error_msg": f"사내 API 서버 접속 거부 ({api_url})"}]
+        except Exception as e:
+            last_error_msg = str(e)
+            
+    # 모든 후보군이 404였을 경우
+    return [{"error_msg": f"모든 경로 탐색 실패 (404). {SAMSAPI_BASE_URL} 경로 내 accounting 도메인을 찾을 수 없습니다."}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -225,7 +212,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">SamsApi 자동연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">Auto-Scanner 탑재 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4">
@@ -341,7 +328,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 스펙 분석 및 데이터 처리 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 경로 탐색 및 데이터 수신 중...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -362,7 +349,7 @@ def render_portal_ui():
                     }
                     
                     if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 ${data[0].error_msg}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [접속 에러] ${data[0].error_msg}</td></tr>`;
                          return;
                     }
                     
