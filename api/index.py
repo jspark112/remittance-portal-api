@@ -12,17 +12,17 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API",
-    version="3.0.0",
+    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (인증키 적용 완료)",
+    version="3.1.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수 (서버 API 주소 및 키)
+# 환경 변수 (SAMSAPI 접속 정보 및 전달받은 API Key 반영)
 # ---------------------------------------------------------
 SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
-SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "여기에_발급받은_API_KEY_입력")
+SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
 
 # ---------------------------------------------------------
 # 지불 정책 Engine
@@ -47,7 +47,6 @@ def get_payment_days_by_amount(amount: float) -> int:
     else: return 110
 
 def calculate_payment_date(occur_date_str: str, request_date_str: str, vendor_name: str, amount: float) -> str:
-    # 빈 값 예외 처리
     if not occur_date_str or len(occur_date_str) < 8:
         occur_date_str = datetime.today().strftime("%Y-%m-%d")
         
@@ -119,12 +118,11 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "Content-Type": "application/json"
     }
     
-    # 1. API 요청 본문(Payload) 조립
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     
     req_body = {
-        "company_code": "01", # 전산팀 확인 필요 (회사코드 디폴트값)
-        "target_date": target_dt.replace("-", ""), # 예: 20260831
+        "company_code": "01",
+        "target_date": target_dt.replace("-", ""),
         "type_account_code": [payload.account_code] if payload.account_code and payload.account_code not in ["", "string", "ALL"] else [],
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
@@ -132,7 +130,6 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     parsed_items = []
     
     try:
-        # 실제 서버로 데이터 요청 (페이징 2000건)
         res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
         
         if res.status_code == 200:
@@ -141,11 +138,9 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                 raw_list = json_data.get("data", [])
                 
                 for raw in raw_list:
-                    # 데이터 맵핑 및 전처리
                     pending_no = raw.get("not_settled_number", "")
                     vendor_name = raw.get("customer_name", "")
                     
-                    # 날짜 형식 변환 (YYYYMMDD -> YYYY-MM-DD)
                     def format_date(d_str):
                         if d_str and len(d_str) == 8: return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
                         return d_str
@@ -153,7 +148,6 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     occur_date = format_date(raw.get("occur_date", ""))
                     due_date = format_date(raw.get("due_date", ""))
                     
-                    # 금액 형식 변환 (String -> Float)
                     def parse_float(val):
                         try: return float(val) if val else 0.0
                         except: return 0.0
@@ -161,11 +155,9 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     balance_amount = parse_float(raw.get("occur_amount_bal"))
                     krw_balance = parse_float(raw.get("local_amount_bal"))
                     
-                    # 미상계건(잔액 존재)만 필터링
                     if payload.unsettled_only and balance_amount <= 0:
                         continue
                         
-                    # 지불일 자동 산정
                     auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
                     
                     parsed_items.append({
@@ -190,12 +182,10 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                 return parsed_items
     except Exception as e:
         print(f"SAMSAPI 연동 에러: {e}")
-        # 오류 발생 시 빈 배열 반환
         pass
 
     return parsed_items
 
-# 로컬(프론트엔드) 추가 필터링 로직 (API가 처리해주지 않는 세부 필터)
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if payload.start_date and payload.start_date.strip() not in ["", "string"]:
         data = [item for item in data if item["occur_date"] >= payload.start_date]
@@ -230,13 +220,14 @@ def render_portal_ui():
             .table-header { background-color: #2b4c7e; color: white; }
             .btn-excel { background-color: #1d6f42; color: white; }
             .btn-zip { background-color: #6f42c1; color: white; }
+            .btn-zip:hover { background-color: #59359a; color: white; }
             .bg-summary { background-color: #fffbeb; }
             .date-input { background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold;}
         </style>
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">SAMSAPI 연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">API Key 연동 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4">
@@ -359,7 +350,7 @@ def render_portal_ui():
                 tbody.innerHTML = ""; summaryBody.innerHTML = "";
                 
                 if(data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-danger fw-bold">검색 조건에 해당하거나 미상계된 데이터가 없습니다. (API 통신 확인)</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-danger fw-bold">검색 조건에 해당하거나 미상계된 데이터가 없습니다. (사내 망 방화벽/API응답 확인)</td></tr>';
                     document.getElementById("grandTotalKrw").innerText = "0 원";
                     return;
                 }
