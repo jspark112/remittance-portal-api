@@ -12,8 +12,8 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 미결 지불관리 포털 API (경로 자동 스캐닝 탑재)",
-    version="4.2.0",
+    description="SamsApi 실시간 연동 미결 지불관리 포털 API (경로 테스터 탑재)",
+    version="4.3.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
@@ -76,20 +76,20 @@ class PendingSearchQuery(BaseModel):
     pending_no: Optional[str] = None
     unsettled_only: bool = True
     use_mock: Optional[bool] = False
+    custom_api_url: Optional[str] = None  # UI에서 직접 입력받은 URL
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
     target_payment_date: str
 
 # ---------------------------------------------------------
-# Mock 데이터 생성 (테스트용)
+# Mock 데이터 생성
 # ---------------------------------------------------------
 def get_mock_pending_data() -> List[dict]:
     items = [
         {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
         {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607010005-0006", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003081", "vendor_name": "(주)매일마린", "occur_date": "2026-06-05", "acc_date": "2026-06-16", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 22706640.00, "balance_amount": 22706640.00, "krw_balance": 22706640.0, "confirmed_voucher_no": "VC20260616-0089", "edm_documents": [{"doc_id": "EDM-3", "doc_type": "세금계산서", "file_name": "MM_Tax.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607150012-0001", "account_code": "2041", "account_name": "미지급금", "vendor_code": "003120", "vendor_name": "세연테크", "occur_date": "2026-07-10", "acc_date": "2026-07-15", "payment_request_date": "2026-08-20", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 3450000.00, "balance_amount": 3450000.00, "krw_balance": 3450000.0, "confirmed_voucher_no": "VC20260715-0004", "edm_documents": [{"doc_id": "EDM-4", "doc_type": "세금계산서", "file_name": "Seyeon_Tax.pdf", "download_url": "#"}]}
+        {"pending_no": "APS202607010005-0006", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003081", "vendor_name": "(주)매일마린", "occur_date": "2026-06-05", "acc_date": "2026-06-16", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 22706640.00, "balance_amount": 22706640.00, "krw_balance": 22706640.0, "confirmed_voucher_no": "VC20260616-0089", "edm_documents": [{"doc_id": "EDM-3", "doc_type": "세금계산서", "file_name": "MM_Tax.pdf", "download_url": "#"}]}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -98,7 +98,7 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 # ---------------------------------------------------------
-# SamsApi 실시간 연동 (다중 경로 스캐닝 탑재)
+# SamsApi 실시간 연동 (다중 경로 스캐닝 및 커스텀 URL 적용)
 # ---------------------------------------------------------
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     headers = {"X-API-Key": SAMSAPI_KEY, "Content-Type": "application/json"}
@@ -111,15 +111,27 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
     
-    # OpenAPI 문서에서 파악한 회계(accounting) 도메인 규칙을 포함하여 404 회피를 위한 경로 스캐닝
-    candidates = [
-        f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list", # Oracle API 도메인 분리 권장 규격 1
-        f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list", # Oracle API 도메인 분리 권장 규격 2
-        f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",            # 기본형
-        f"{SAMSAPI_BASE_URL}/sams/api/v1/ntstl/list"        # 레거시(SAMS) 라우팅
-    ]
-    
-    parsed_items = []
+    # UI에서 사용자가 직접 입력한 주소가 있다면 그 주소만 단독으로 테스트
+    if payload.custom_api_url and payload.custom_api_url.strip() != "":
+        candidates = [payload.custom_api_url.strip()]
+    else:
+        candidates = [
+            f"{SAMSAPI_BASE_URL}/accounting/api/v1/ntstl/list",
+            f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list",
+            f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
+            f"{SAMSAPI_BASE_URL}/sams/api/v1/ntstl/list"
+        ]
+        # Auto-Discovery (API Key 헤더 추가!)
+        try:
+            spec_res = requests.get(f"{SAMSAPI_BASE_URL}/openapi.json", headers=headers, timeout=3)
+            if spec_res.status_code == 200:
+                for path in spec_res.json().get("paths", {}).keys():
+                    if "ntstl" in path:
+                        candidates.insert(0, f"{SAMSAPI_BASE_URL}{path}")
+                        break
+        except Exception:
+            pass
+
     last_error_msg = ""
     
     for api_url in candidates:
@@ -127,12 +139,14 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
             res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5)
             
             if res.status_code == 404:
-                continue # 404(경로없음)이면 에러 내지 않고 다음 후보 주소로 즉시 재시도
+                last_error_msg = f"엔드포인트 호출 오류 (HTTP 404) - 시도한 주소: {api_url}"
+                continue # 404면 다음 주소로 넘어감
                 
             if res.status_code == 200:
                 json_data = res.json()
                 if json_data.get("success"):
                     raw_list = json_data.get("data", [])
+                    parsed_items = []
                     for raw in raw_list:
                         pending_no = raw.get("not_settled_number", "")
                         vendor_name = raw.get("customer_name", "")
@@ -174,8 +188,7 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         except Exception as e:
             last_error_msg = str(e)
             
-    # 모든 후보군이 404였을 경우
-    return [{"error_msg": f"모든 경로 탐색 실패 (404). {SAMSAPI_BASE_URL} 경로 내 accounting 도메인을 찾을 수 없습니다."}]
+    return [{"error_msg": last_error_msg or "모든 경로 탐색 실패 (404)."}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -212,9 +225,21 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">Auto-Scanner 탑재 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-warning text-dark fs-6 ms-2">디버깅 모드 탑재 🟡</span></span>
         </nav>
         
+        <!-- 디버그 전용 URL 테스트 UI -->
+        <div class="card p-3 mb-4 border-danger">
+            <h5 class="fw-bold text-danger mb-3">🛠 실시간 API 경로 찔러보기 (404 에러 해결용)</h5>
+            <div class="input-group">
+                <span class="input-group-text bg-danger text-white fw-bold">테스트 API 주소</span>
+                <input type="text" class="form-control" id="customApiUrl" value="http://211.104.10.171:7071/api/v1/ntstl/list" placeholder="여기에 사내망 정확한 주소를 입력하세요">
+                <button class="btn btn-primary fw-bold" onclick="loadPendingData(false)">이 주소로 조회(API)</button>
+                <button class="btn btn-mock fw-bold" onclick="loadPendingData(true)">MOCK 복귀</button>
+            </div>
+            <small class="text-muted mt-2">※ 중간 경로가 빠진 것 같습니다. <b>/sams/api/...</b> 또는 <b>/accounting/api/...</b> 처럼 주소를 조금씩 바꿔가며 찔러보세요!</small>
+        </div>
+
         <div class="card p-3 mb-4">
             <h5 class="fw-bold text-secondary mb-3">🔍 미결 조회 조건 (미상계건 대상)</h5>
             <div class="row g-3">
@@ -246,16 +271,6 @@ def render_portal_ui():
                 <div class="col-md-2">
                     <label class="form-label text-secondary fw-bold">거래처코드</label>
                     <input type="text" class="form-control" id="vendorCode" placeholder="코드 입력">
-                </div>
-            </div>
-            
-            <div class="row g-3 mt-2">
-                <div class="col-md-6"></div>
-                <div class="col-md-6 d-flex align-items-end gap-2">
-                    <button class="btn btn-mock fw-bold flex-fill" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
-                    <button class="btn btn-primary fw-bold flex-fill" onclick="loadPendingData(false)">조회(API)</button>
-                    <button class="btn btn-excel fw-bold flex-fill" onclick="downloadExcel()">엑셀(계획)</button>
-                    <button class="btn btn-zip fw-bold flex-fill" onclick="downloadEdmZip()">증빙 ZIP</button>
                 </div>
             </div>
         </div>
@@ -319,7 +334,8 @@ def render_portal_ui():
                     account_code: document.getElementById("accountCode").value,
                     vendor_code: document.getElementById("vendorCode").value,
                     unsettled_only: true,
-                    use_mock: useMock
+                    use_mock: useMock,
+                    custom_api_url: document.getElementById("customApiUrl") ? document.getElementById("customApiUrl").value : null
                 };
             }
 
@@ -328,7 +344,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">SamsApi 경로 탐색 및 데이터 수신 중...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">API 통신 처리 중입니다...</td></tr>';
                 summaryBody.innerHTML = "";
                 document.getElementById("grandTotalKrw").innerText = "0 원";
                 
@@ -349,12 +365,12 @@ def render_portal_ui():
                     }
                     
                     if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [접속 에러] ${data[0].error_msg}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 [에러 발생] ${data[0].error_msg}</td></tr>`;
                          return;
                     }
                     
                     if(data.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조건에 해당하는 미상계 데이터가 없습니다.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조건에 해당하는 미상계 데이터가 없습니다. (해당 주소 호출은 성공함!)</td></tr>';
                         return;
                     }
 
@@ -391,7 +407,7 @@ def render_portal_ui():
                     }
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
                 } catch(e) {
-                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 오류 발생: ${e.message}</td></tr>`;
+                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 스크립트 오류: ${e.message}</td></tr>`;
                 }
             }
 
@@ -405,24 +421,8 @@ def render_portal_ui():
                 alert((await res.json()).message);
             }
 
-            function downloadExcel() {
-                fetch('/api/pending/export-plan-excel', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false))
-                }).then(res => res.blob()).then(blob => {
-                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서_${new Date().toISOString().slice(0,10)}.xlsx`; a.click();
-                });
-            }
-
-            function downloadEdmZip() {
-                fetch('/api/pending/export-edm-zip', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false))
-                }).then(res => res.blob()).then(blob => {
-                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `EDM_증빙자료_${new Date().toISOString().slice(0,10)}.zip`; a.click();
-                });
-            }
-
             window.onload = function() {
-                document.getElementById("pendingTableBody").innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>';
+                document.getElementById("pendingTableBody").innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">테스트 API 주소를 입력 후 버튼을 눌러보세요.</td></tr>';
             };
         </script>
     </body>
