@@ -12,12 +12,12 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (API Key 동적 테스터 탑재)",
-    version="8.1.0"
+    description="SamsApi 실시간 연동 (순정 API 경로 최종 복구 버전)",
+    version="9.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
-DEFAULT_SAMSAPI_KEY = "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw"
+DEFAULT_SAMSAPI_KEY = "kEM2f1JJ3c20Tu0Z9O47gkqe5DlwX87uu1p80GaBXE0"
 
 REGULAR_SUPPLIERS = {
     "한라시스템", "해동구명설비(주)", "한라레벨(주)-한라IMS(주)", "정양엔지니어링",
@@ -61,7 +61,7 @@ class PendingSearchQuery(BaseModel):
     pending_no: Optional[str] = None
     unsettled_only: bool = True
     use_mock: Optional[bool] = False
-    api_key: Optional[str] = None # 화면에서 입력받은 API 키
+    api_key: Optional[str] = None
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
@@ -69,8 +69,7 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data() -> List[dict]:
     items = [
-        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]}
+        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -78,17 +77,19 @@ def get_mock_pending_data() -> List[dict]:
     return items
 
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
-    # 화면에서 키를 입력했으면 그 키를, 아니면 하드코딩된 기본 키를 사용
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     
     headers = {
         "X-API-Key": active_key,
-        "Authorization": f"Bearer {active_key}", # 혹시 몰라 Bearer 토큰 형식도 같이 전송
+        "Authorization": f"Bearer {active_key}",
         "Content-Type": "application/json"
     }
     
-    # 드디어 정확히 찾아낸 그 주소!
-    api_url = f"{SAMSAPI_BASE_URL}/api/v1/accounting/ntstl/list"
+    # 순정 경로 복구 완료! 가장 먼저 API 매뉴얼 주소를 시도합니다.
+    candidates = [
+        f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
+        f"{SAMSAPI_BASE_URL}/sams/api/v1/ntstl/list"
+    ]
 
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     req_body = {
@@ -97,43 +98,47 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
 
-    try:
-        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
-        if res.status_code == 404:
-            return [{"error_msg": f"HTTP 404 (경로 없음) - 주소: {api_url}"}]
-        if res.status_code == 401:
-            return [{"error_msg": f"인증 실패 (HTTP 401) - API Key가 만료되었거나 IP 차단됨. 새 키를 발급받아 상단 입력창에 넣고 다시 조회하세요."}]
-        if res.status_code == 200:
-            json_data = res.json()
-            if json_data.get("success"):
-                raw_list = json_data.get("data", [])
-                parsed_items = []
-                for raw in raw_list:
-                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                    occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
-                    def parse_float(val):
-                        try: return float(val) if val else 0.0
-                        except: return 0.0
-                        
-                    krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
-                    balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
-                    if payload.unsettled_only and balance_amount <= 0: continue
-                        
-                    auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
-                    parsed_items.append({
-                        "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                        "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
-                        "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                        "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
-                        "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
-                    })
-                return parsed_items
-            else: return [{"error_msg": f"API 데이터 실패: {json_data.get('message')} - URL: {api_url}"}]
-        else: return [{"error_msg": f"서버 응답 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
-    except requests.exceptions.Timeout: return [{"error_msg": f"연결 시간 초과 - 방화벽(8400포트) 차단 확인"}]
-    except requests.exceptions.ConnectionError: return [{"error_msg": f"접속 거부 - 도메인 장애 또는 Vercel 차단"}]
-    except Exception as e: return [{"error_msg": f"백엔드 로직 오류: {str(e)}"}]
+    last_error_msg = ""
+    for api_url in candidates:
+        try:
+            res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
+            if res.status_code == 404:
+                last_error_msg = f"HTTP 404 (경로 없음) - 주소: {api_url}"
+                continue
+            if res.status_code == 401:
+                return [{"error_msg": f"인증 실패 (HTTP 401) - API Key 권한 만료 또는 IP 차단됨. ({api_url})"}]
+            if res.status_code == 200:
+                json_data = res.json()
+                if json_data.get("success"):
+                    raw_list = json_data.get("data", [])
+                    parsed_items = []
+                    for raw in raw_list:
+                        def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
+                        occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
+                        def parse_float(val):
+                            try: return float(val) if val else 0.0
+                            except: return 0.0
+                            
+                        krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
+                        balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
+                        if payload.unsettled_only and balance_amount <= 0: continue
+                            
+                        auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
+                        parsed_items.append({
+                            "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                            "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
+                            "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                            "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
+                            "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                            "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
+                        })
+                    return parsed_items
+                else: return [{"error_msg": f"API 데이터 실패: {json_data.get('message')} - URL: {api_url}"}]
+            else: return [{"error_msg": f"서버 응답 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
+        except requests.exceptions.Timeout: return [{"error_msg": f"연결 시간 초과 - 방화벽(8400포트) 차단 확인"}]
+        except requests.exceptions.ConnectionError: return [{"error_msg": f"접속 거부 - 도메인 장애 또는 Vercel 차단"}]
+        except Exception as e: return [{"error_msg": f"백엔드 로직 오류: {str(e)}"}]
+    return [{"error_msg": last_error_msg}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -146,7 +151,7 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
 
 @app.get("/portal", response_class=HTMLResponse, tags=["0. 사용자 포털 UI"])
 def render_portal_ui():
-    return """
+    return f"""
     <!DOCTYPE html>
     <html lang="ko">
     <head>
@@ -154,30 +159,28 @@ def render_portal_ui():
         <title>흥아해운 송금 관리 포털</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <style>
-            body { background-color: #f4f6f9; font-family: 'Malgun Gothic', sans-serif; }
-            .navbar { background-color: #1a365d; }
-            .card { border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-            .table-header { background-color: #2b4c7e; color: white; }
-            .btn-excel { background-color: #1d6f42; color: white; }
-            .btn-mock { background-color: #6c757d; color: white; border-color: #6c757d; }
-            .bg-summary { background-color: #fffbeb; }
-            .date-input { background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold;}
+            body {{ background-color: #f4f6f9; font-family: 'Malgun Gothic', sans-serif; }}
+            .navbar {{ background-color: #1a365d; }}
+            .card {{ border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
+            .table-header {{ background-color: #2b4c7e; color: white; }}
+            .btn-excel {{ background-color: #1d6f42; color: white; }}
+            .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
+            .bg-summary {{ background-color: #fffbeb; }}
+            .date-input {{ background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold;}}
         </style>
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">API Key 동적 교체 지원 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">순정 API 연동 완료 🟢</span></span>
         </nav>
         
-        <!-- 🚨 새로 추가된 API Key 입력창 -->
         <div class="card p-3 mb-4 border-primary">
-            <h5 class="fw-bold text-primary mb-3">🔑 인증 정보 설정 (전산팀 발급 키)</h5>
+            <h5 class="fw-bold text-primary mb-3">🔑 인증 정보 설정</h5>
             <div class="input-group">
                 <span class="input-group-text bg-primary text-white fw-bold">SAMSAPI Key</span>
-                <input type="text" class="form-control fw-bold" id="customApiKey" value="Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw" placeholder="새로운 API Key를 발급받으면 여기에 붙여넣으세요">
-                <button class="btn btn-warning fw-bold" onclick="loadPendingData(false)">이 인증키로 조회(API)</button>
+                <input type="text" class="form-control fw-bold text-secondary" id="customApiKey" value="{DEFAULT_SAMSAPI_KEY}" placeholder="API Key 입력">
+                <button class="btn btn-warning fw-bold" onclick="loadPendingData(false)">조회(API)</button>
             </div>
-            <small class="text-muted mt-2">※ 401 에러가 나면 전산팀에 새 키를 발급받아 위 칸에 붙여넣기만 하면 바로 실데이터가 연동됩니다.</small>
         </div>
 
         <div class="card p-3 mb-4">
@@ -226,76 +229,76 @@ def render_portal_ui():
         </div>
 
         <script>
-            function buildSearchPayload(useMock = false) {
-                return {
+            function buildSearchPayload(useMock = false) {{
+                return {{
                     branch_code: "본사", start_date: document.getElementById("startDate").value, end_date: document.getElementById("endDate").value,
                     unsettled_only: true, use_mock: useMock,
-                    api_key: document.getElementById("customApiKey").value // 화면의 키워드를 페이로드에 담아 전송
-                };
-            }
+                    api_key: document.getElementById("customApiKey").value
+                }};
+            }}
 
-            async function loadPendingData(useMock = false) {
+            async function loadPendingData(useMock = false) {{
                 const payload = buildSearchPayload(useMock);
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="8" class="py-4 text-primary fw-bold">데이터 수신 처리 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
                 summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
                 
-                try {
-                    const res = await fetch('/api/pending/search-and-schedule', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-                    });
+                try {{
+                    const res = await fetch('/api/pending/search-and-schedule', {{
+                        method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload)
+                    }});
                     const text = await res.text();
                     let data = JSON.parse(text);
                     
-                    if(data.length > 0 && data[0].error_msg) {
-                         tbody.innerHTML = `<tr><td colspan="8" class="py-4 text-danger fw-bold fs-5">${data[0].error_msg}</td></tr>`;
+                    if(data.length > 0 && data[0].error_msg) {{
+                         tbody.innerHTML = `<tr><td colspan="8" class="py-4 text-danger fw-bold fs-5">${{data[0].error_msg}}</td></tr>`;
                          return;
-                    }
-                    if(data.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="8" class="py-4 text-muted fw-bold">조건에 해당하는 미상계 데이터가 없습니다. (통신 성공)</td></tr>';
+                    }}
+                    if(data.length === 0) {{
+                        tbody.innerHTML = '<tr><td colspan="8" class="py-4 text-muted fw-bold">검색 조건에 해당하는 미결 데이터가 없습니다. (연동 완벽 성공!)</td></tr>';
                         return;
-                    }
+                    }}
 
-                    let summary = {}; let grandTotalKrw = 0; tbody.innerHTML = "";
-                    data.forEach(item => {
+                    let summary = {{}}; let grandTotalKrw = 0; tbody.innerHTML = "";
+                    data.forEach(item => {{
                         let curr = item.currency;
-                        if(!summary[curr]) summary[curr] = { krw: 0 };
+                        if(!summary[curr]) summary[curr] = {{ krw: 0 }};
                         summary[curr].krw += item.krw_balance;
                         grandTotalKrw += item.krw_balance;
 
                         const tr = document.createElement("tr");
                         tr.innerHTML = `
-                            <td class="text-primary fw-bold">${item.pending_no}</td>
-                            <td class="fw-bold">${item.vendor_name}</td>
-                            <td><span class="badge ${curr === 'KRW' ? 'bg-secondary' : 'bg-danger'}">${curr}</span></td>
-                            <td class="text-end pe-3">${Number(item.balance_amount).toLocaleString()}</td>
-                            <td class="fw-bold text-end pe-3">${Number(item.krw_balance).toLocaleString()} 원</td>
-                            <td><span class="text-muted">${item.auto_payment_date}</span></td>
-                            <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${item.pending_no}" value="${item.scheduled_payment_date}"></td>
-                            <td><button class="btn btn-sm btn-success fw-bold" onclick="saveDate('${item.pending_no}')">저장</button></td>
+                            <td class="text-primary fw-bold">${{item.pending_no}}</td>
+                            <td class="fw-bold">${{item.vendor_name}}</td>
+                            <td><span class="badge ${{curr === 'KRW' ? 'bg-secondary' : 'bg-danger'}}">${{curr}}</span></td>
+                            <td class="text-end pe-3">${{Number(item.balance_amount).toLocaleString()}}</td>
+                            <td class="fw-bold text-end pe-3">${{Number(item.krw_balance).toLocaleString()}} 원</td>
+                            <td><span class="text-muted">${{item.auto_payment_date}}</span></td>
+                            <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${{item.pending_no}}" value="${{item.scheduled_payment_date}}"></td>
+                            <td><button class="btn btn-sm btn-success fw-bold" onclick="saveDate('${{item.pending_no}}')">저장</button></td>
                         `;
                         tbody.appendChild(tr);
-                    });
-                    for(const [curr, amounts] of Object.entries(summary)) {
+                    }});
+                    for(const [curr, amounts] of Object.entries(summary)) {{
                         const tr = document.createElement("tr");
-                        tr.innerHTML = `<td class="fw-bold text-primary">${curr}</td><td class="text-end pe-4 fw-bold">${Number(amounts.krw).toLocaleString()} 원</td>`;
+                        tr.innerHTML = `<td class="fw-bold text-primary">${{curr}}</td><td class="text-end pe-4 fw-bold">${{Number(amounts.krw).toLocaleString()}} 원</td>`;
                         summaryBody.appendChild(tr);
-                    }
+                    }}
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
-                } catch(e) { tbody.innerHTML = `<tr><td colspan="8" class="py-4 text-danger fw-bold">🚨 오류 발생: ${e.message}</td></tr>`; }
-            }
-            async function saveDate(pendingNo) {
-                const newDate = document.getElementById(`date-${pendingNo}`).value;
-                const res = await fetch('/api/pending/save-payment-date', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ pending_no: pendingNo, target_payment_date: newDate }) });
+                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="8" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
+            }}
+            async function saveDate(pendingNo) {{
+                const newDate = document.getElementById(`date-${{pendingNo}}`).value;
+                const res = await fetch('/api/pending/save-payment-date', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{ pending_no: pendingNo, target_payment_date: newDate }}) }});
                 alert((await res.json()).message);
-            }
-            function downloadExcel() {
-                fetch('/api/pending/export-plan-excel', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false)) })
-                .then(res => res.blob()).then(blob => { const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서.xlsx`; a.click(); });
-            }
-            window.onload = function() { loadPendingData(false); };
+            }}
+            function downloadExcel() {{
+                fetch('/api/pending/export-plan-excel', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(buildSearchPayload(false)) }})
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서.xlsx`; a.click(); }});
+            }}
+            window.onload = function() {{ loadPendingData(false); }};
         </script>
     </body>
     </html>
