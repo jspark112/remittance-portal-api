@@ -2,6 +2,7 @@ import io
 import os
 import requests
 import zipfile
+import traceback
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 from fastapi import FastAPI, HTTPException, Response
@@ -12,14 +13,14 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (인증키 적용 완료)",
-    version="3.1.0",
+    description="SAMSAPI 실시간 연동 미결 지불관리 포털 API (에러 디버깅 및 MOCK 지원)",
+    version="3.2.0",
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
 
 # ---------------------------------------------------------
-# 환경 변수 (SAMSAPI 접속 정보 및 전달받은 API Key 반영)
+# 환경 변수
 # ---------------------------------------------------------
 SAMSAPI_BASE_URL = os.getenv("SAMSAPI_BASE_URL", "http://211.104.10.171:7071")
 SAMSAPI_KEY = os.getenv("SAMSAPI_KEY", "Hw-_k-QPRgzolGqkLFIGYLzwqDnep53-wprci845GWw")
@@ -78,6 +79,7 @@ class PendingSearchQuery(BaseModel):
     vendor_code: Optional[str] = None
     pending_no: Optional[str] = None
     unsettled_only: bool = True
+    use_mock: Optional[bool] = False # Mock 데이터 사용 여부 플래그
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
@@ -107,6 +109,24 @@ class PendingPaymentItem(BaseModel):
     scheduled_payment_date: str
     confirmed_voucher_no: str
     edm_documents: List[EdmDocumentInfo] = []
+    error_msg: Optional[str] = None # 에러 메시지 전달용 필드
+
+# ---------------------------------------------------------
+# Mock 데이터
+# ---------------------------------------------------------
+def get_mock_pending_data() -> List[dict]:
+    items = [
+        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
+        {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]},
+        {"pending_no": "APS202607010005-0006", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003081", "vendor_name": "(주)매일마린", "occur_date": "2026-06-05", "acc_date": "2026-06-16", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 22706640.00, "balance_amount": 22706640.00, "krw_balance": 22706640.0, "confirmed_voucher_no": "VC20260616-0089", "edm_documents": [{"doc_id": "EDM-3", "doc_type": "세금계산서", "file_name": "MM_Tax.pdf", "download_url": "#"}]},
+        {"pending_no": "APS202607150012-0001", "account_code": "2041", "account_name": "미지급금", "vendor_code": "003120", "vendor_name": "세연테크", "occur_date": "2026-07-10", "acc_date": "2026-07-15", "payment_request_date": "2026-08-20", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 3450000.00, "balance_amount": 3450000.00, "krw_balance": 3450000.0, "confirmed_voucher_no": "VC20260715-0004", "edm_documents": [{"doc_id": "EDM-4", "doc_type": "세금계산서", "file_name": "Seyeon_Tax.pdf", "download_url": "#"}]},
+        {"pending_no": "APS202608050003-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "002881", "vendor_name": "비아이산업주식회사", "occur_date": "2026-08-01", "acc_date": "2026-08-05", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 12500000.00, "balance_amount": 12500000.00, "krw_balance": 12500000.0, "confirmed_voucher_no": "VC20260805-0021", "edm_documents": [{"doc_id": "EDM-5", "doc_type": "세금계산서", "file_name": "BI_Tax.pdf", "download_url": "#"}]}
+    ]
+    for item in items:
+        auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
+        item["auto_payment_date"] = auto_date
+        item["scheduled_payment_date"] = auto_date
+    return items
 
 # ---------------------------------------------------------
 # SAMSAPI 실시간 연동 핵심 로직
@@ -130,7 +150,7 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     parsed_items = []
     
     try:
-        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
+        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=5) # 타임아웃 5초 설정
         
         if res.status_code == 200:
             json_data = res.json()
@@ -180,13 +200,24 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                         "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"{vendor_name}_증빙.pdf", "download_url": "#"}]
                     })
                 return parsed_items
+            else:
+                 return [{"error_msg": f"API 응답 실패: {json_data.get('message')}"}]
+        else:
+             return [{"error_msg": f"서버 통신 오류 (HTTP {res.status_code})"}]
+    except requests.exceptions.Timeout:
+         return [{"error_msg": "API 연결 시간 초과 (방화벽 또는 VPN 확인 필요)"}]
+    except requests.exceptions.ConnectionError:
+         return [{"error_msg": "API 서버 접속 실패 (방화벽 차단 또는 IP 확인 필요)"}]
     except Exception as e:
-        print(f"SAMSAPI 연동 에러: {e}")
-        pass
+         return [{"error_msg": f"예기치 않은 오류 발생: {str(e)}"}]
 
     return parsed_items
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
+    # 에러 메시지가 포함된 객체인 경우 바로 반환
+    if data and data[0].get("error_msg"):
+        return data
+
     if payload.start_date and payload.start_date.strip() not in ["", "string"]:
         data = [item for item in data if item["occur_date"] >= payload.start_date]
     if payload.end_date and payload.end_date.strip() not in ["", "string"]:
@@ -223,11 +254,12 @@ def render_portal_ui():
             .btn-zip:hover { background-color: #59359a; color: white; }
             .bg-summary { background-color: #fffbeb; }
             .date-input { background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold;}
+            .btn-mock { background-color: #6c757d; color: white; border-color: #6c757d; }
         </style>
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">API Key 연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 지불관리 포털 <span class="badge bg-success fs-6 ms-2">API 연동 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4">
@@ -265,9 +297,10 @@ def render_portal_ui():
             </div>
             
             <div class="row g-3 mt-2">
-                <div class="col-md-8"></div>
-                <div class="col-md-4 d-flex align-items-end gap-2">
-                    <button class="btn btn-primary fw-bold flex-fill" onclick="loadPendingData()">조회</button>
+                <div class="col-md-6"></div>
+                <div class="col-md-6 d-flex align-items-end gap-2">
+                    <button class="btn btn-mock fw-bold flex-fill" onclick="loadPendingData(true)">MOCK데이터조회(테스트)</button>
+                    <button class="btn btn-primary fw-bold flex-fill" onclick="loadPendingData(false)">조회(API)</button>
                     <button class="btn btn-excel fw-bold flex-fill" onclick="downloadExcel()">엑셀(계획)</button>
                     <button class="btn btn-zip fw-bold flex-fill" onclick="downloadEdmZip()">증빙 ZIP</button>
                 </div>
@@ -323,7 +356,7 @@ def render_portal_ui():
         </div>
 
         <script>
-            function buildSearchPayload() {
+            function buildSearchPayload(useMock = false) {
                 return {
                     branch_code: "본사",
                     start_date: document.getElementById("startDate").value,
@@ -332,60 +365,75 @@ def render_portal_ui():
                     pay_end_date: document.getElementById("payEndDate").value,
                     account_code: document.getElementById("accountCode").value,
                     vendor_code: document.getElementById("vendorCode").value,
-                    unsettled_only: true
+                    unsettled_only: true,
+                    use_mock: useMock
                 };
             }
 
-            async function loadPendingData() {
-                const payload = buildSearchPayload();
-                const res = await fetch('/api/pending/search-and-schedule', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload)
-                });
-                const data = await res.json();
-                
+            async function loadPendingData(useMock = false) {
+                const payload = buildSearchPayload(useMock);
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
-                tbody.innerHTML = ""; summaryBody.innerHTML = "";
                 
-                if(data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-danger fw-bold">검색 조건에 해당하거나 미상계된 데이터가 없습니다. (사내 망 방화벽/API응답 확인)</td></tr>';
-                    document.getElementById("grandTotalKrw").innerText = "0 원";
-                    return;
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터를 불러오는 중입니다...</td></tr>';
+                
+                try {
+                    const res = await fetch('/api/pending/search-and-schedule', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    
+                    tbody.innerHTML = ""; summaryBody.innerHTML = "";
+                    
+                    if(data.length > 0 && data[0].error_msg) {
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">통신 에러: ${data[0].error_msg}</td></tr>`;
+                         document.getElementById("grandTotalKrw").innerText = "0 원";
+                         return;
+                    }
+                    
+                    if(data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-danger fw-bold">검색 조건에 해당하거나 미상계된 데이터가 없습니다.</td></tr>';
+                        document.getElementById("grandTotalKrw").innerText = "0 원";
+                        return;
+                    }
+
+                    let summary = {}; let grandTotalKrw = 0;
+
+                    data.forEach(item => {
+                        let curr = item.currency;
+                        if(!summary[curr]) summary[curr] = { original: 0, krw: 0 };
+                        summary[curr].original += item.balance_amount;
+                        summary[curr].krw += item.krw_balance;
+                        grandTotalKrw += item.krw_balance;
+
+                        const tr = document.createElement("tr");
+                        tr.innerHTML = `
+                            <td class="text-primary fw-bold">${item.pending_no}</td>
+                            <td><span class="badge bg-light text-dark border">${item.account_code}</span> ${item.account_name}</td>
+                            <td class="fw-bold">${item.vendor_name}</td>
+                            <td><span class="badge ${curr === 'KRW' ? 'bg-secondary' : 'bg-danger'}">${curr}</span></td>
+                            <td>${Number(item.exchange_rate).toLocaleString()}</td>
+                            <td class="text-end pe-3">${Number(item.balance_amount).toLocaleString(undefined, {minimumFractionDigits: curr==='KRW'?0:2})}</td>
+                            <td class="fw-bold text-end pe-3">${Number(item.krw_balance).toLocaleString()} 원</td>
+                            <td><span class="text-muted">${item.auto_payment_date}</span></td>
+                            <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${item.pending_no}" value="${item.scheduled_payment_date}"></td>
+                            <td><button class="btn btn-sm btn-success fw-bold" onclick="saveDate('${item.pending_no}')">저장</button></td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+
+                    for(const [curr, amounts] of Object.entries(summary)) {
+                        const tr = document.createElement("tr");
+                        tr.innerHTML = `<td class="fw-bold text-primary">${curr}</td><td class="text-end pe-4">${Number(amounts.original).toLocaleString(undefined, {minimumFractionDigits: curr==='KRW'?0:2})}</td><td class="text-end pe-4 fw-bold">${Number(amounts.krw).toLocaleString()} 원</td>`;
+                        summaryBody.appendChild(tr);
+                    }
+                    document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
+                } catch(e) {
+                     tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">API 호출 중 에러 발생: ${e.message}</td></tr>`;
+                     document.getElementById("grandTotalKrw").innerText = "0 원";
                 }
-
-                let summary = {}; let grandTotalKrw = 0;
-
-                data.forEach(item => {
-                    let curr = item.currency;
-                    if(!summary[curr]) summary[curr] = { original: 0, krw: 0 };
-                    summary[curr].original += item.balance_amount;
-                    summary[curr].krw += item.krw_balance;
-                    grandTotalKrw += item.krw_balance;
-
-                    const tr = document.createElement("tr");
-                    tr.innerHTML = `
-                        <td class="text-primary fw-bold">${item.pending_no}</td>
-                        <td><span class="badge bg-light text-dark border">${item.account_code}</span> ${item.account_name}</td>
-                        <td class="fw-bold">${item.vendor_name}</td>
-                        <td><span class="badge ${curr === 'KRW' ? 'bg-secondary' : 'bg-danger'}">${curr}</span></td>
-                        <td>${Number(item.exchange_rate).toLocaleString()}</td>
-                        <td class="text-end pe-3">${Number(item.balance_amount).toLocaleString(undefined, {minimumFractionDigits: curr==='KRW'?0:2})}</td>
-                        <td class="fw-bold text-end pe-3">${Number(item.krw_balance).toLocaleString()} 원</td>
-                        <td><span class="text-muted">${item.auto_payment_date}</span></td>
-                        <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${item.pending_no}" value="${item.scheduled_payment_date}"></td>
-                        <td><button class="btn btn-sm btn-success fw-bold" onclick="saveDate('${item.pending_no}')">저장</button></td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-
-                for(const [curr, amounts] of Object.entries(summary)) {
-                    const tr = document.createElement("tr");
-                    tr.innerHTML = `<td class="fw-bold text-primary">${curr}</td><td class="text-end pe-4">${Number(amounts.original).toLocaleString(undefined, {minimumFractionDigits: curr==='KRW'?0:2})}</td><td class="text-end pe-4 fw-bold">${Number(amounts.krw).toLocaleString()} 원</td>`;
-                    summaryBody.appendChild(tr);
-                }
-                document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
             }
 
             async function saveDate(pendingNo) {
@@ -400,7 +448,7 @@ def render_portal_ui():
 
             function downloadExcel() {
                 fetch('/api/pending/export-plan-excel', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload())
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false))
                 }).then(res => res.blob()).then(blob => {
                     const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서_${new Date().toISOString().slice(0,10)}.xlsx`; a.click();
                 });
@@ -408,13 +456,16 @@ def render_portal_ui():
 
             function downloadEdmZip() {
                 fetch('/api/pending/export-edm-zip', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload())
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildSearchPayload(false))
                 }).then(res => res.blob()).then(blob => {
                     const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `EDM_증빙자료_${new Date().toISOString().slice(0,10)}.zip`; a.click();
                 });
             }
 
-            window.onload = loadPendingData;
+            window.onload = function() {
+                // 페이지 로드 시 Mock 데이터로 임시 조회하여 화면 확인 가능하게 함
+                loadPendingData(true);
+            };
         </script>
     </body>
     </html>
@@ -428,7 +479,10 @@ def read_root(): return {"status": "online"}
 
 @app.post("/api/pending/search-and-schedule", response_model=List[PendingPaymentItem])
 def search_and_schedule_pending(payload: PendingSearchQuery):
-    raw_data = fetch_real_pending_data(payload)
+    if payload.use_mock:
+         raw_data = get_mock_pending_data()
+    else:
+         raw_data = fetch_real_pending_data(payload)
     return filter_data(payload, raw_data)
 
 @app.post("/api/pending/save-payment-date")
@@ -437,7 +491,7 @@ def save_payment_date(payload: PaymentDateSaveRequest):
 
 @app.post("/api/pending/export-plan-excel")
 def export_plan_excel(payload: PendingSearchQuery):
-    filtered_data = filter_data(payload, fetch_real_pending_data(payload))
+    filtered_data = filter_data(payload, get_mock_pending_data() if payload.use_mock else fetch_real_pending_data(payload))
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "지불계획서"
     ws.append(["지불예정일", "미결번호", "계정코드", "계정명", "거래처명", "통화", "환율", "발생(외화)잔액", "원화환산액", "자동산정일"])
     for cell in ws[1]: cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid"); cell.font = Font(color="FFFFFF", bold=True); cell.alignment = Alignment(horizontal="center")
@@ -460,7 +514,7 @@ def export_plan_excel(payload: PendingSearchQuery):
 
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
-    filtered_data = filter_data(payload, fetch_real_pending_data(payload))
+    filtered_data = filter_data(payload, get_mock_pending_data() if payload.use_mock else fetch_real_pending_data(payload))
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
