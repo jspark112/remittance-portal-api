@@ -21,8 +21,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (전표번호/확정전표번호/미결번호 3단계 EDM 자동 탐색)",
-    version="19.0.0"
+    description="SamsApi 실시간 연동 (전표번호=증빙번호 EDM 직접 매핑 적용)",
+    version="21.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -86,9 +86,8 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202607130008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007449", "vendor_name": "MARINA SHIPBROKERS INI", "occur_date": "2026-06-30", "acc_date": "2026-06-30", "payment_request_date": "2026-07-13", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "journal_no": "S202607130012", "confirmed_voucher_no": "S202606300192"},
-        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "journal_no": "VC20260607-0012", "confirmed_voucher_no": "VC20260607-0012"},
-        {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "journal_no": "LN-001", "confirmed_voucher_no": "LN-001"}
+        {"pending_no": "APS202607130008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007449", "vendor_name": "MARINA SHIPBROKERS INDIA PVT LTD", "occur_date": "2026-06-30", "acc_date": "2026-06-30", "payment_request_date": "2026-07-13", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "journal_no": "S202607130012", "confirmed_voucher_no": "S202606300192"},
+        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "journal_no": "VC20260607-0012", "confirmed_voucher_no": "VC20260607-0012"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -140,6 +139,9 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                     auto_date = calculate_payment_date(from_dt, to_dt, vendor_name, balance_amount)
                     scheduled_date = payload.saved_dates.get(loan_id) or manual_payment_dates_db.get(loan_id, to_dt or auto_date)
 
+                    journal_no = str(raw.get("journal_number") or raw.get("journal_no") or raw.get("slip_number") or "").strip()
+                    confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or "").strip()
+
                     parsed_items.append({
                         "pending_no": loan_id, "account_code": "LOAN", "account_name": loan_type_name,
                         "vendor_code": raw.get("financial_customer_code", ""), "vendor_name": vendor_name, 
@@ -147,8 +149,8 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                         "payment_request_date": to_dt, "currency": raw.get("currency_code", "KRW"), "exchange_rate": 1.0,
                         "occur_amount": loan_amount, "balance_amount": balance_amount, "krw_balance": balance_amount,
                         "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
-                        "journal_no": raw.get("journal_number", ""),
-                        "confirmed_voucher_no": raw.get("group_settled_number", "")
+                        "journal_no": journal_no,
+                        "confirmed_voucher_no": confirmed_no
                     })
                 return parsed_items
             else: return []
@@ -199,14 +201,18 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
                     scheduled_date = payload.saved_dates.get(pending_no) or manual_payment_dates_db.get(pending_no, auto_date)
 
+                    # 🚨 전표번호(=증빙번호)와 확정전표번호 추출
+                    journal_no = str(raw.get("journal_number") or raw.get("journal_no") or raw.get("slip_number") or "").strip()
+                    confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or "").strip()
+
                     parsed_items.append({
                         "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
                         "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": occur_date,
                         "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
                         "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
                         "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
-                        "journal_no": raw.get("journal_number", ""),
-                        "confirmed_voucher_no": raw.get("group_settled_number", "")
+                        "journal_no": journal_no,
+                        "confirmed_voucher_no": confirmed_no
                     })
                 return parsed_items
             else: return []
@@ -285,7 +291,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호/확정전표번호 매핑 및 EDM 3단계 연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호=증빙번호 EDM 직접 다운로드 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -544,12 +550,12 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "3단계 이중검색 다운로드 중...";
+                btn.innerText = "전표 증빙 원본 다운로드 중...";
                 btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
-                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_전표_EDM증빙자료_디버그.zip`; a.click(); 
+                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_전표_EDM증빙자료.zip`; a.click(); 
                     btn.innerText = originalText; btn.disabled = false;
                 }}).catch(() => {{ 
                     alert("다운로드 중 오류가 발생했습니다."); 
@@ -757,7 +763,7 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [EDM 3단계 자동 탐색다운로드]
+# 🚨 [전표번호 = 증빙번호 직접 매핑 EDM 다운로드]
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -775,42 +781,31 @@ def export_edm_zip(payload: PendingSearchQuery):
             
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             
-            # 🚨 3가지 후보 키 준비 (1순위: 전표번호, 2순위: 확정전표번호, 3순위: 미결번호)
-            candidates = []
+            # 🚨 전표번호(=증빙번호) 1순위 적용
             j_no = str(item.get("journal_no") or "").strip()
             v_no = str(item.get("confirmed_voucher_no") or "").strip()
             p_no = str(item.get("pending_no") or "").strip()
             
-            if j_no: candidates.append(j_no)
-            if v_no and v_no not in candidates: candidates.append(v_no)
-            if p_no and p_no not in candidates: candidates.append(p_no)
+            candidates = []
+            if j_no: candidates.append(j_no) # 전표번호 (S202607130012)
+            if v_no and v_no not in candidates: candidates.append(v_no) # 확정전표번호
+            if p_no and p_no not in candidates: candidates.append(p_no) # 미결번호
             
             edm_list = []
-            debug_logs = [f"=== EDM 증빙 다운로드 3단계 탐색 리포트 ===", f"거래처: {clean_vendor}", f"후보 키: {candidates}", ""]
-            
             for key_no in candidates:
                 req_body = {"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}
-                debug_logs.append(f"[시도] 키워드 '{key_no}'로 EDM 조회 중...")
                 try:
                     res = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
-                    debug_logs.append(f" - HTTP 응답코드: {res.status_code}")
                     if res.status_code == 200:
                         json_data = res.json()
-                        debug_logs.append(f" - 응답데이터: {json_data}")
                         if json_data.get("success") and json_data.get("data"):
                             edm_list = json_data.get("data")
-                            debug_logs.append(f" => 성공! '{key_no}'에서 {len(edm_list)}개 파일 발견.")
                             break
-                        else:
-                            debug_logs.append(" => 해당 키에는 매핑된 파일이 없습니다.")
-                    else:
-                        debug_logs.append(f" - 에러 메시지: {res.text}")
-                except Exception as e:
-                    debug_logs.append(f" - 호출 실패 예외: {str(e)}")
+                except Exception:
+                    pass
             
             if not edm_list:
-                debug_logs.append("\n[결과] 준비된 모든 키(전표/확정전표/미결)로 탐색했으나 파일이 없습니다.")
-                zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음_원인분석.txt", "\n".join(debug_logs).encode('utf-8'))
+                zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"전표번호({candidates})에 해당하는 EDM 증빙이 없습니다.".encode('utf-8'))
             else:
                 for idx, edm in enumerate(edm_list, 1):
                     real_filename = edm.get("filename", f"document_{idx}.pdf")
@@ -825,15 +820,9 @@ def export_edm_zip(payload: PendingSearchQuery):
                             if file_res.status_code == 200:
                                 new_filename = f"{counter}_{clean_vendor}_{real_filename}"
                                 zip_file.writestr(new_filename, file_res.content)
-                                debug_logs.append(f" -> '{real_filename}' 저장 완료")
-                            else:
-                                debug_logs.append(f" -> 다운로드 실패 (HTTP {file_res.status_code})")
-                        except Exception as e:
-                            debug_logs.append(f" -> 다운로드 예외 발생: {str(e)}")
-                            
-                zip_file.writestr(f"{counter}_{clean_vendor}_다운로드성공_상세로그.txt", "\n".join(debug_logs).encode('utf-8'))
-            
+                        except Exception:
+                            pass
             counter += 1
                 
     zip_buffer.seek(0)
-    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=Real_EDM_Documents_Debug.zip"})
+    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=Real_EDM_Documents.zip"})
