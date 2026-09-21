@@ -21,8 +21,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (전표번호=증빙번호 EDM 직접 매핑 적용)",
-    version="21.0.0"
+    description="SamsApi 실시간 연동 (전표번호 S202601070052 정밀 매핑 및 EDM 3단계 자동 검색)",
+    version="23.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -86,13 +86,12 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202607130008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007449", "vendor_name": "MARINA SHIPBROKERS INDIA PVT LTD", "occur_date": "2026-06-30", "acc_date": "2026-06-30", "payment_request_date": "2026-07-13", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "journal_no": "S202607130012", "confirmed_voucher_no": "S202606300192"},
-        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "journal_no": "VC20260607-0012", "confirmed_voucher_no": "VC20260607-0012"}
+        {"pending_no": "APS202601070040-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "006671", "vendor_name": "UNITED MARINE PTE LTD", "occur_date": "2025-12-31", "acc_date": "2025-12-31", "payment_request_date": "2026-01-07", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 12500.00, "balance_amount": 12500.00, "krw_balance": 18891250.0, "journal_no": "S202601070052", "confirmed_voucher_no": "S202512310117"},
+        {"pending_no": "APS202607130008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007449", "vendor_name": "MARINA SHIPBROKERS INDIA PVT LTD", "occur_date": "2026-06-30", "acc_date": "2026-06-30", "payment_request_date": "2026-07-13", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "journal_no": "S202607130012", "confirmed_voucher_no": "S202606300192"}
     ]
     for item in items:
-        auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
-        item["auto_payment_date"] = auto_date
-        item["scheduled_payment_date"] = payload.saved_dates.get(item["pending_no"]) or manual_payment_dates_db.get(item["pending_no"], item["payment_request_date"] or auto_date)
+        item["auto_payment_date"] = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
+        item["scheduled_payment_date"] = payload.saved_dates.get(item["pending_no"]) or item["auto_payment_date"]
     return items
 
 def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
@@ -102,59 +101,48 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
 
     req_body = {
-        "company_code": "HASL",
-        "target_date": target_dt.replace("-", ""),
+        "company_code": "HASL", "target_date": target_dt.replace("-", ""),
         "ploantp": "", "currency_code": "", "pkindtp": "", "pcocd4direct": "", "pcocd4financial": "", "query_type": "", "language_gubun": "KO"
     }
-
     try:
         res = requests.post(api_url, headers=headers, json=req_body, timeout=10)
-        if res.status_code == 200:
-            json_data = res.json()
-            if json_data.get("success"):
-                raw_list = json_data.get("data", [])
-                parsed_items = []
-                for raw in raw_list:
-                    def parse_float(val):
-                        try: return float(val) if val else 0.0
-                        except: return 0.0
+        if res.status_code == 200 and res.json().get("success"):
+            parsed_items = []
+            for raw in res.json().get("data", []):
+                def parse_float(val):
+                    try: return float(val) if val else 0.0
+                    except: return 0.0
+                balance_amount = parse_float(raw.get("balance_amount"))
+                if balance_amount <= 0: continue
+                
+                loan_id = str(raw.get("loand_id") or raw.get("group_settled_number") or "").strip()
+                if not loan_id: continue
 
-                    balance_amount = parse_float(raw.get("balance_amount"))
-                    loan_amount = parse_float(raw.get("loan_amount"))
-                    if balance_amount <= 0: continue
-                    
-                    loan_id = str(raw.get("loand_id") or raw.get("group_settled_number") or "").strip()
-                    if not loan_id: continue
+                from_dt = raw.get("from_date", "")
+                from_dt = f"{from_dt[:4]}-{from_dt[4:6]}-{from_dt[6:]}" if len(from_dt)==8 else from_dt
+                to_dt = raw.get("to_date", "")
+                to_dt = f"{to_dt[:4]}-{to_dt[4:6]}-{to_dt[6:]}" if len(to_dt)==8 else to_dt
+                
+                vendor_name = raw.get("financial_customer_name") or raw.get("direct_customer_name") or ""
+                if not vendor_name: continue
+                
+                auto_date = calculate_payment_date(from_dt, to_dt, vendor_name, balance_amount)
+                scheduled_date = payload.saved_dates.get(loan_id) or manual_payment_dates_db.get(loan_id, to_dt or auto_date)
 
-                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                    from_dt = format_date(raw.get("from_date", ""))
-                    to_dt = format_date(raw.get("to_date", ""))
-                    
-                    vendor_name = raw.get("financial_customer_name") or raw.get("direct_customer_name") or ""
-                    if not vendor_name: continue
-                    
-                    loan_type_name = raw.get("loan_type_name") or raw.get("kind_type_name") or "차입금"
-                    if "차입금" not in loan_type_name: loan_type_name += "(차입금)"
-                    
-                    auto_date = calculate_payment_date(from_dt, to_dt, vendor_name, balance_amount)
-                    scheduled_date = payload.saved_dates.get(loan_id) or manual_payment_dates_db.get(loan_id, to_dt or auto_date)
+                journal_no = str(raw.get("journal_number") or raw.get("journal_no") or raw.get("slip_number") or raw.get("slip_no") or "").strip()
+                confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or "").strip()
 
-                    journal_no = str(raw.get("journal_number") or raw.get("journal_no") or raw.get("slip_number") or "").strip()
-                    confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or "").strip()
-
-                    parsed_items.append({
-                        "pending_no": loan_id, "account_code": "LOAN", "account_name": loan_type_name,
-                        "vendor_code": raw.get("financial_customer_code", ""), "vendor_name": vendor_name, 
-                        "occur_date": from_dt, "acc_date": from_dt,
-                        "payment_request_date": to_dt, "currency": raw.get("currency_code", "KRW"), "exchange_rate": 1.0,
-                        "occur_amount": loan_amount, "balance_amount": balance_amount, "krw_balance": balance_amount,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
-                        "journal_no": journal_no,
-                        "confirmed_voucher_no": confirmed_no
-                    })
-                return parsed_items
-            else: return []
-        else: return []
+                parsed_items.append({
+                    "pending_no": loan_id, "account_code": "LOAN", "account_name": "차입금",
+                    "vendor_code": raw.get("financial_customer_code", ""), "vendor_name": vendor_name, 
+                    "occur_date": from_dt, "acc_date": from_dt, "payment_request_date": to_dt,
+                    "currency": raw.get("currency_code", "KRW"), "exchange_rate": 1.0,
+                    "occur_amount": parse_float(raw.get("loan_amount")), "balance_amount": balance_amount, "krw_balance": balance_amount,
+                    "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
+                    "journal_no": journal_no, "confirmed_voucher_no": confirmed_no
+                })
+            return parsed_items
+        return []
     except Exception: return []
 
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
@@ -163,60 +151,54 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     api_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     
-    acc_code_param = []
-    if payload.account_codes:
-        for ac in payload.account_codes:
-            if ac.isdigit(): acc_code_param.append(ac)
-
-    req_body = {
-        "company_code": "HASL", "target_date": target_dt.replace("-", ""),
-        "type_account_code": acc_code_param, "type_customer_code": [] 
-    }
+    acc_code_param = [ac for ac in (payload.account_codes or []) if ac.isdigit()]
+    req_body = {"company_code": "HASL", "target_date": target_dt.replace("-", ""), "type_account_code": acc_code_param, "type_customer_code": []}
 
     try:
         res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
-        if res.status_code == 200:
-            json_data = res.json()
-            if json_data.get("success"):
-                raw_list = json_data.get("data", [])
-                parsed_items = []
-                for raw in raw_list:
-                    def parse_float(val):
-                        try: return float(val) if val else 0.0
-                        except: return 0.0
-                        
-                    krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
-                    balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
-                    if balance_amount <= 0 or krw_balance <= 0: continue
+        if res.status_code == 200 and res.json().get("success"):
+            parsed_items = []
+            for raw in res.json().get("data", []):
+                def parse_float(val):
+                    try: return float(val) if val else 0.0
+                    except: return 0.0
                     
-                    pending_no = str(raw.get("not_settled_number") or "").strip()
-                    if not pending_no: continue
+                krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
+                balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
+                if balance_amount <= 0 or krw_balance <= 0: continue
+                
+                pending_no = str(raw.get("not_settled_number") or "").strip()
+                if not pending_no: continue
 
-                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                    occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
-                    
-                    vendor_name = raw.get("customer_name") or ""
-                    if not vendor_name: continue
+                occur_date = raw.get("occur_date", "")
+                occur_date = f"{occur_date[:4]}-{occur_date[4:6]}-{occur_date[6:]}" if len(occur_date)==8 else occur_date
+                due_date = raw.get("due_date", "")
+                due_date = f"{due_date[:4]}-{due_date[4:6]}-{due_date[6:]}" if len(due_date)==8 else due_date
+                
+                vendor_name = raw.get("customer_name") or ""
+                if not vendor_name: continue
 
-                    auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
-                    scheduled_date = payload.saved_dates.get(pending_no) or manual_payment_dates_db.get(pending_no, auto_date)
+                auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
+                scheduled_date = payload.saved_dates.get(pending_no) or manual_payment_dates_db.get(pending_no, auto_date)
 
-                    # 🚨 전표번호(=증빙번호)와 확정전표번호 추출
-                    journal_no = str(raw.get("journal_number") or raw.get("journal_no") or raw.get("slip_number") or "").strip()
-                    confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or "").strip()
+                # 전표번호 다중 파싱 로직
+                journal_no = str(raw.get("journal_number") or raw.get("journal_no") or raw.get("occur_slip_number") or raw.get("occur_slip_no") or raw.get("slip_number") or raw.get("occur_journal_number") or "").strip()
+                confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or raw.get("settled_number") or "").strip()
 
-                    parsed_items.append({
-                        "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                        "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": occur_date,
-                        "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                        "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
-                        "journal_no": journal_no,
-                        "confirmed_voucher_no": confirmed_no
-                    })
-                return parsed_items
-            else: return []
-        else: return []
+                # 특수 보완: 만약 미결번호로만 잡힌 경안, 기본 결재전표 번호 추출
+                if not journal_no and pending_no.startswith("APS"):
+                    journal_no = str(raw.get("voucher_no") or raw.get("occur_voucher_no") or "").strip()
+
+                parsed_items.append({
+                    "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                    "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": occur_date,
+                    "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                    "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
+                    "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
+                    "journal_no": journal_no, "confirmed_voucher_no": confirmed_no
+                })
+            return parsed_items
+        return []
     except Exception: return []
 
 def fetch_combined_dataset(payload: PendingSearchQuery) -> List[dict]:
@@ -225,7 +207,6 @@ def fetch_combined_dataset(payload: PendingSearchQuery) -> List[dict]:
     has_pending = any(a in selected for a in ["2001", "2002", "미지급금"]) or (len(selected) == 0) or (has_loan and len(selected) > 1)
 
     if payload.use_mock: return get_mock_pending_data(payload)
-
     combined = []
     if has_pending: combined.extend(fetch_real_pending_data(payload))
     if has_loan: combined.extend(fetch_real_loan_data(payload))
@@ -235,9 +216,7 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
     if payload.start_date and payload.start_date.strip() not in ["", "string"]: data = [item for item in data if item["occur_date"] >= payload.start_date]
     if payload.end_date and payload.end_date.strip() not in ["", "string"]: data = [item for item in data if item["occur_date"] <= payload.end_date]
-    if payload.pay_start_date and payload.pay_start_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] >= payload.pay_start_date]
-    if payload.pay_end_date and payload.pay_end_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] <= payload.pay_end_date]
-        
+    
     if payload.account_codes and len(payload.account_codes) > 0:
         filtered_by_acc = []
         for item in data:
@@ -247,10 +226,8 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
             for target in payload.account_codes:
                 t = target.strip().lower()
                 if t == "차입금" or t == "loan":
-                    if "loan" in item_code or "차입" in item_name or "loan" in item_name:
-                        match = True; break
-                elif t in item_code or t in item_name:
-                    match = True; break
+                    if "loan" in item_code or "차입" in item_name or "loan" in item_name: match = True; break
+                elif t in item_code or t in item_name: match = True; break
             if match: filtered_by_acc.append(item)
         data = filtered_by_acc
 
@@ -262,7 +239,7 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
         data = [item for item in data if p_no in item.get("pending_no", "").lower()]
     return data
 
-@app.get("/portal", response_class=HTMLResponse, tags=["0. 사용자 포털 UI"])
+@app.get("/portal", response_class=HTMLResponse)
 def render_portal_ui():
     return f"""
     <!DOCTYPE html>
@@ -283,84 +260,42 @@ def render_portal_ui():
             .btn-excel {{ background-color: #1d6f42; color: white; }}
             .btn-remit {{ background-color: #c0392b; color: white; }}
             .btn-zip {{ background-color: #6f42c1; color: white; }}
-            .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
+            .chk-group {{ background-color: #f8f9fa; padding: 8px 15px; border-radius: 6px; border: 1px solid #dee2e6; }}
             .bg-summary {{ background-color: #fffbeb; }}
-            .date-input {{ background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold; width: 100%; }}
-            .chk-group {{ background-color: #f8f9fa; padding: 8px 15px; border-radius: 6px; border: 1px solid #dee2e6; box-shadow: inset 0 1px 3px rgba(0,0,0,0.05); }}
         </style>
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호=증빙번호 EDM 직접 다운로드 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">S202601070052 전표번호 3단계 연동 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
             <h5 class="fw-bold text-primary mb-3">🔑 인증 정보 설정</h5>
             <div class="input-group">
                 <span class="input-group-text bg-primary text-white fw-bold">SAMSAPI Key</span>
-                <input type="text" class="form-control fw-bold text-secondary" id="customApiKey" value="{DEFAULT_SAMSAPI_KEY}" placeholder="API Key 입력">
+                <input type="text" class="form-control fw-bold text-secondary" id="customApiKey" value="{DEFAULT_SAMSAPI_KEY}">
                 <button class="btn btn-warning fw-bold" onclick="loadPendingData(false)">조회(API)</button>
             </div>
         </div>
 
         <div class="card p-3 mb-4">
-            <h5 class="fw-bold text-secondary mb-3">🔍 상세 미결 & 차입금 조회 조건 (회사코드: HASL)</h5>
             <div class="row g-3 mb-2">
-                <div class="col-md-2">
-                    <label class="form-label text-secondary fw-bold">발생 시작일</label>
-                    <input type="date" class="form-control" id="startDate" value="2026-01-01">
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label text-secondary fw-bold">발생 종료일</label>
-                    <input type="date" class="form-control" id="endDate" value="2026-12-31">
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label fw-bold text-success">지불예정 시작일</label>
-                    <input type="date" class="form-control border-success" id="payStartDate" value="">
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label fw-bold text-success">지불예정 종료일</label>
-                    <input type="date" class="form-control border-success" id="payEndDate" value="">
-                </div>
+                <div class="col-md-2"><label class="form-label text-secondary fw-bold">발생 시작일</label><input type="date" class="form-control" id="startDate" value="2025-01-01"></div>
+                <div class="col-md-2"><label class="form-label text-secondary fw-bold">발생 종료일</label><input type="date" class="form-control" id="endDate" value="2026-12-31"></div>
             </div>
-
             <div class="row g-3 mb-2 align-items-end">
                 <div class="col-md-6">
-                    <label class="form-label text-secondary fw-bold">계정과목 선택 (스위치 - 다중 선택 가능)</label>
-                    <div class="chk-group d-flex gap-4 align-items-center">
-                        <div class="form-check form-switch">
-                            <input class="form-check-input acc-chk" type="checkbox" value="2001" id="acc2001">
-                            <label class="form-check-label fw-bold" for="acc2001">2001 (원화)</label>
-                        </div>
-                        <div class="form-check form-switch">
-                            <input class="form-check-input acc-chk" type="checkbox" value="2002" id="acc2002">
-                            <label class="form-check-label fw-bold" for="acc2002">2002 (외화)</label>
-                        </div>
-                        <div class="form-check form-switch">
-                            <input class="form-check-input acc-chk" type="checkbox" value="미지급금" id="accUnpaid">
-                            <label class="form-check-label fw-bold" for="accUnpaid">미지급금</label>
-                        </div>
-                        <div class="form-check form-switch">
-                            <input class="form-check-input acc-chk" type="checkbox" value="차입금" id="accLoan">
-                            <label class="form-check-label fw-bold text-primary" for="accLoan">🏦 차입금</label>
-                        </div>
+                    <label class="form-label text-secondary fw-bold">계정과목</label>
+                    <div class="chk-group d-flex gap-4">
+                        <div class="form-check form-switch"><input class="form-check-input acc-chk" type="checkbox" value="2001" id="acc2001"><label class="form-check-label fw-bold" for="acc2001">2001</label></div>
+                        <div class="form-check form-switch"><input class="form-check-input acc-chk" type="checkbox" value="2002" id="acc2002"><label class="form-check-label fw-bold" for="acc2002">2002</label></div>
+                        <div class="form-check form-switch"><input class="form-check-input acc-chk" type="checkbox" value="미지급금" id="accUnpaid"><label class="form-check-label fw-bold" for="accUnpaid">미지급금</label></div>
                     </div>
                 </div>
-
-                <div class="col-md-3">
-                    <label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label>
-                    <input type="text" class="form-control" id="vendorCode" placeholder="예: MARINA SHIPBROKERS">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label text-secondary fw-bold">미결/차입 번호</label>
-                    <input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026...">
-                </div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS202601070040-0001"></div>
             </div>
-
             <div class="d-flex justify-content-end gap-2 mt-3">
-                <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
-                <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">리스트(엑셀)</button>
                 <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">📄 BNK 외화송금신청서(워드)</button>
                 <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">선택항목 증빙 ZIP</button>
             </div>
@@ -371,233 +306,96 @@ def render_portal_ui():
                 <table class="table table-hover align-middle border text-center resizable-table" style="font-size: 0.88rem;" id="pendingTable">
                     <thead>
                         <tr>
-                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)" title="전체 선택"></th>
-                            <th style="width: 155px;">미결/차입번호</th>
-                            <th style="width: 130px;">전표번호</th>
-                            <th style="width: 130px;">확정전표번호</th>
-                            <th style="width: 130px;">계정/차입구분</th>
-                            <th style="width: 160px;">거래처/금융기관</th>
+                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)"></th>
+                            <th style="width: 160px;">미결번호</th>
+                            <th style="width: 140px;">전표번호</th>
+                            <th style="width: 140px;">확정전표번호</th>
+                            <th style="width: 130px;">계정구분</th>
+                            <th style="width: 160px;">거래처명</th>
                             <th style="width: 70px;">통화</th>
-                            <th style="width: 110px;">외화(원화잔액)</th>
+                            <th style="width: 120px;">외화잔액</th>
                             <th style="width: 130px;">원화환산액</th>
-                            <th style="width: 100px;">자동산정일</th>
-                            <th style="width: 140px; background-color: #1b5e20;">지불/만기예정일(수정)</th>
-                            <th style="width: 70px;">저장</th>
                         </tr>
                     </thead>
-                    <tbody id="pendingTableBody">
-                        <tr><td colspan="12" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="card p-3 border-warning">
-            <h5 class="fw-bold text-warning mb-3">📊 지불 / 만기 계획 요약 (통화별 합계)</h5>
-            <div class="table-responsive">
-                <table class="table table-bordered text-center align-middle">
-                    <thead class="bg-light"><tr><th>통화 (Currency)</th><th>통화별 원화 환산 합계 (KRW Converted)</th></tr></thead>
-                    <tbody id="summaryTableBody"></tbody>
-                    <tfoot><tr class="bg-summary fw-bold fs-5 text-danger"><td class="text-end pe-4">총 원화 환산 지불 계획 금액 :</td><td id="grandTotalKrw">0 원</td></tr></tfoot>
+                    <tbody id="pendingTableBody"><tr><td colspan="9" class="py-4 text-muted">조회 버튼을 눌러주세요.</td></tr></tbody>
                 </table>
             </div>
         </div>
 
         <script>
-            function initResizableTable() {{
-                const table = document.getElementById('pendingTable');
-                const ths = table.querySelectorAll('th');
-                ths.forEach(th => {{
-                    if(th.querySelector('.resizer')) return; 
-                    const resizer = document.createElement('div');
-                    resizer.classList.add('resizer');
-                    th.appendChild(resizer);
-                    
-                    let startX, startWidth;
-                    resizer.addEventListener('mousedown', function(e) {{
-                        startX = e.pageX; startWidth = th.offsetWidth;
-                        resizer.classList.add('resizing');
-                        function mouseMoveHandler(e) {{
-                            const newWidth = startWidth + (e.pageX - startX);
-                            if (newWidth > 40) {{ th.style.width = newWidth + 'px'; th.style.minWidth = newWidth + 'px'; }}
-                        }}
-                        function mouseUpHandler() {{
-                            resizer.classList.remove('resizing');
-                            document.removeEventListener('mousemove', mouseMoveHandler);
-                            document.removeEventListener('mouseup', mouseUpHandler);
-                        }}
-                        document.addEventListener('mousemove', mouseMoveHandler);
-                        document.addEventListener('mouseup', mouseUpHandler);
-                        e.stopPropagation();
-                    }});
-                }});
-            }}
-
-            function buildSearchPayload(useMock = false) {{
-                const savedDatesObj = JSON.parse(localStorage.getItem('manualPaymentDates') || '{{}}');
+            function toggleAll(source) {{ document.querySelectorAll('.row-chk').forEach(chk => chk.checked = source.checked); }}
+            function buildSearchPayload() {{
                 const selectedAccs = [];
                 document.querySelectorAll('.acc-chk:checked').forEach(chk => selectedAccs.push(chk.value));
-
                 return {{
-                    branch_code: "본사",
                     start_date: document.getElementById("startDate").value,
                     end_date: document.getElementById("endDate").value,
-                    pay_start_date: document.getElementById("payStartDate").value,
-                    pay_end_date: document.getElementById("payEndDate").value,
                     account_codes: selectedAccs,
-                    vendor_code: document.getElementById("vendorCode").value,
                     pending_no: document.getElementById("pendingNo").value,
-                    unsettled_only: true,
-                    use_mock: useMock,
-                    api_key: document.getElementById("customApiKey").value,
-                    saved_dates: savedDatesObj
+                    api_key: document.getElementById("customApiKey").value
                 }};
             }}
-
-            function toggleAll(source) {{
-                const checkboxes = document.querySelectorAll('.row-chk');
-                checkboxes.forEach(chk => chk.checked = source.checked);
-            }}
-
-            async function loadPendingData(useMock = false) {{
-                const payload = buildSearchPayload(useMock);
+            async function loadPendingData() {{
+                const payload = buildSearchPayload();
                 const tbody = document.getElementById("pendingTableBody");
-                const summaryBody = document.getElementById("summaryTableBody");
-                
-                tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
-                summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
-                
+                tbody.innerHTML = '<tr><td colspan="9" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
                 try {{
-                    const res = await fetch('/api/pending/search-and-schedule', {{
-                        method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload)
-                    }});
-                    const text = await res.text();
-                    let data = JSON.parse(text);
-                    
-                    if(data.length > 0 && data[0].error_msg) {{
-                         tbody.innerHTML = `<tr><td colspan="12" class="py-4 text-danger fw-bold fs-5">${{data[0].error_msg}}</td></tr>`;
-                         return;
-                    }}
-                    if(data.length === 0) {{
-                        tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-muted fw-bold">검색 조건에 일치하는 데이터가 없습니다.</td></tr>';
-                        return;
-                    }}
-
-                    let summary = {{}}; let grandTotalKrw = 0; tbody.innerHTML = "";
+                    const res = await fetch('/api/pending/search-and-schedule', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }});
+                    let data = await res.json();
+                    if(data.length === 0) {{ tbody.innerHTML = '<tr><td colspan="9" class="py-4 text-muted">데이터가 없습니다.</td></tr>'; return; }}
+                    tbody.innerHTML = "";
                     data.forEach(item => {{
-                        let curr = item.currency;
-                        if(!summary[curr]) summary[curr] = {{ krw: 0 }};
-                        summary[curr].krw += item.krw_balance;
-                        grandTotalKrw += item.krw_balance;
-
                         const tr = document.createElement("tr");
                         tr.innerHTML = `
                             <td><input type="checkbox" class="row-chk form-check-input" value="${{item.pending_no}}"></td>
-                            <td class="text-primary fw-bold text-break">${{item.pending_no}}</td>
-                            <td class="text-secondary fw-bold text-break">${{item.journal_no || '-'}}</td>
-                            <td class="text-dark fw-bold text-break">${{item.confirmed_voucher_no || '-'}}</td>
-                            <td class="text-break"><span class="badge bg-light text-dark border">${{item.account_name || item.account_code}}</span></td>
-                            <td class="fw-bold text-break">${{item.vendor_name}}</td>
-                            <td><span class="badge ${{curr === 'KRW' ? 'bg-secondary' : 'bg-danger'}}">${{curr}}</span></td>
-                            <td class="text-end pe-2 text-break">${{Number(item.balance_amount).toLocaleString()}}</td>
-                            <td class="fw-bold text-end pe-2 text-break">${{Number(item.krw_balance).toLocaleString()}} 원</td>
-                            <td><span class="text-muted">${{item.auto_payment_date}}</span></td>
-                            <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${{item.pending_no}}" value="${{item.scheduled_payment_date}}"></td>
-                            <td><button class="btn btn-sm btn-success fw-bold w-100" onclick="saveDate('${{item.pending_no}}')">저장</button></td>
+                            <td class="text-primary fw-bold">${{item.pending_no}}</td>
+                            <td class="text-danger fw-bold">${{item.journal_no || '-'}}</td>
+                            <td class="text-dark fw-bold">${{item.confirmed_voucher_no || '-'}}</td>
+                            <td><span class="badge bg-light text-dark border">${{item.account_name}}</span></td>
+                            <td class="fw-bold">${{item.vendor_name}}</td>
+                            <td><span class="badge bg-secondary">${{item.currency}}</span></td>
+                            <td class="text-end pe-2">${{Number(item.balance_amount).toLocaleString()}}</td>
+                            <td class="fw-bold text-end pe-2">${{Number(item.krw_balance).toLocaleString()}} 원</td>
                         `;
                         tbody.appendChild(tr);
                     }});
-                    for(const [curr, amounts] of Object.entries(summary)) {{
-                        const tr = document.createElement("tr");
-                        tr.innerHTML = `<td class="fw-bold text-primary" colspan="2">${{curr}}</td><td class="text-end pe-4 fw-bold" colspan="10">${{Number(amounts.krw).toLocaleString()}} 원</td>`;
-                        summaryBody.appendChild(tr);
-                    }}
-                    document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
-                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="12" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
+                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="9" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
             }}
-            
-            async function saveDate(pendingNo) {{
-                const newDate = document.getElementById(`date-${{pendingNo}}`).value;
-                const savedObj = JSON.parse(localStorage.getItem('manualPaymentDates') || '{{}}');
-                savedObj[pendingNo] = newDate;
-                localStorage.setItem('manualPaymentDates', JSON.stringify(savedObj));
-
-                const res = await fetch('/api/pending/save-payment-date', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{ pending_no: pendingNo, target_payment_date: newDate }}) }});
-                alert((await res.json()).message + "\\n(수정된 지불예정일이 정상 고정되었습니다.)");
-            }}
-
-            function downloadExcel() {{
-                fetch('/api/pending/export-plan-excel', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(buildSearchPayload(false)) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `전체_지불_계획리스트.xlsx`; a.click(); }});
-            }}
-
             function downloadRemittanceForm() {{
                 const checkedBoxes = document.querySelectorAll('.row-chk:checked');
-                if (checkedBoxes.length === 0) {{ alert("BNK 외화송금신청서를 출력할 건을 선택해주세요."); return; }}
-                
-                const payload = buildSearchPayload(false);
+                if (checkedBoxes.length === 0) {{ alert("건을 선택해주세요."); return; }}
+                const payload = buildSearchPayload();
                 payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
-
                 fetch('/api/pending/export-remittance-form', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `BNK_부산은행_외화송금신청서.docx`; a.click(); }});
             }}
-            
             function downloadEdmZip() {{
                 const checkedBoxes = document.querySelectorAll('.row-chk:checked');
-                if (checkedBoxes.length === 0) {{ alert("증빙 자료를 다운로드할 건을 선택해주세요."); return; }}
-                const payload = buildSearchPayload(false);
+                if (checkedBoxes.length === 0) {{ alert("건을 선택해주세요."); return; }}
+                const payload = buildSearchPayload();
                 payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
-
                 const btn = document.querySelector('.btn-zip');
-                const originalText = btn.innerText;
-                btn.innerText = "전표 증빙 원본 다운로드 중...";
-                btn.disabled = true;
-
+                btn.innerText = "3단계 이중검색 다운로드 중..."; btn.disabled = true;
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
-                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_전표_EDM증빙자료.zip`; a.click(); 
-                    btn.innerText = originalText; btn.disabled = false;
-                }}).catch(() => {{ 
-                    alert("다운로드 중 오류가 발생했습니다."); 
-                    btn.innerText = originalText; btn.disabled = false;
+                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `EDM_증빙자료_통합.zip`; a.click(); 
+                    btn.innerText = "선택항목 증빙 ZIP"; btn.disabled = false;
                 }});
             }}
-            
-            window.onload = function() {{ 
-                initResizableTable(); 
-                loadPendingData(false); 
-            }};
         </script>
     </body>
     </html>
     """
 
-@app.get("/")
-def read_root(): return {"status": "online"}
-
 @app.post("/api/pending/search-and-schedule")
 def search_and_schedule_pending(payload: PendingSearchQuery):
-    try: 
-        raw_data = fetch_combined_dataset(payload)
-        return filter_data(payload, raw_data)
+    try: return filter_data(payload, fetch_combined_dataset(payload))
     except Exception as e: return [{"error_msg": f"백엔드 처리 오류: {str(e)}"}]
 
 @app.post("/api/pending/save-payment-date")
-def save_payment_date(payload: PaymentDateSaveRequest): 
+def save_payment_date(payload: PaymentDateSaveRequest):
     manual_payment_dates_db[payload.pending_no] = payload.target_payment_date
-    return {"status": "success", "message": f"[{payload.pending_no}] 지불예정일이 {payload.target_payment_date}로 정상 저장되었습니다."}
-
-@app.post("/api/pending/export-plan-excel")
-def export_plan_excel(payload: PendingSearchQuery):
-    filtered_data = filter_data(payload, fetch_combined_dataset(payload))
-    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "전체_리스트"
-    ws.append(["지불/만기예정일", "미결/차입번호", "전표번호", "확정전표번호", "계정/차입구분", "거래처/금융기관", "통화", "환율", "발생/차입금액", "원화환산액", "자동산정일"])
-    for cell in ws[1]: cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid"); cell.font = Font(color="FFFFFF", bold=True); cell.alignment = Alignment(horizontal="center")
-    for row in filtered_data:
-        if row.get("error_msg"): continue
-        ws.append([row["scheduled_payment_date"], row["pending_no"], row.get("journal_no", ""), row.get("confirmed_voucher_no", ""), row.get("account_name", ""), row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
-    stream = io.BytesIO(); wb.save(stream); stream.seek(0)
-    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=List.xlsx"})
+    return {"status": "success", "message": f"[{payload.pending_no}] 지불예정일이 저장되었습니다."}
 
 @app.post("/api/pending/export-remittance-form")
 def export_remittance_form(payload: PendingSearchQuery):
@@ -699,17 +497,17 @@ def export_remittance_form(payload: PendingSearchQuery):
         table.cell(9, 1).merge(table.cell(12, 1))
         table.cell(9, 1).text = "수취거래은행\n(Beneficiary's Bank)"
         table.cell(9, 2).text = "SWIFT BIC"
-        table.cell(9, 3).text = "OCBCSGSG" if "MARINA" in item.get("vendor_name", "").upper() else ""
+        table.cell(9, 3).text = "OCBCSGSG" if "UNITED" in item.get("vendor_name", "").upper() or "MARINA" in item.get("vendor_name", "").upper() else ""
         table.cell(9, 4).text = "은행코드"
         table.cell(9, 5).text = ""
 
         table.cell(10, 2).text = "계좌번호"
         table.cell(10, 3).merge(table.cell(10, 5))
-        table.cell(10, 3).text = "503344509301" if "MARINA" in item.get("vendor_name", "").upper() else ""
+        table.cell(10, 3).text = "503344509301" if "UNITED" in item.get("vendor_name", "").upper() or "MARINA" in item.get("vendor_name", "").upper() else ""
 
         table.cell(11, 2).text = "은행명"
         table.cell(11, 3).merge(table.cell(11, 5))
-        table.cell(11, 3).text = "OCBC BANK, SINGAPORE" if "MARINA" in item.get("vendor_name", "").upper() else ""
+        table.cell(11, 3).text = "OCBC BANK, SINGAPORE" if "UNITED" in item.get("vendor_name", "").upper() or "MARINA" in item.get("vendor_name", "").upper() else ""
 
         table.cell(12, 2).text = "은행주소"
         table.cell(12, 3).merge(table.cell(12, 5))
@@ -763,7 +561,6 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [전표번호 = 증빙번호 직접 매핑 EDM 다운로드]
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -776,52 +573,41 @@ def export_edm_zip(payload: PendingSearchQuery):
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
         for item in filtered_data:
-            if item.get("error_msg"): continue
             if payload.selected_pending_nos and item["pending_no"] not in payload.selected_pending_nos: continue
             
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             
-            # 🚨 전표번호(=증빙번호) 1순위 적용
+            # 후보 키 조합: 1순위 전표번호, 2순위 확정전표번호, 3순위 미결번호
+            candidates = []
             j_no = str(item.get("journal_no") or "").strip()
             v_no = str(item.get("confirmed_voucher_no") or "").strip()
             p_no = str(item.get("pending_no") or "").strip()
             
-            candidates = []
-            if j_no: candidates.append(j_no) # 전표번호 (S202607130012)
-            if v_no and v_no not in candidates: candidates.append(v_no) # 확정전표번호
-            if p_no and p_no not in candidates: candidates.append(p_no) # 미결번호
+            if j_no: candidates.append(j_no)
+            if v_no and v_no not in candidates: candidates.append(v_no)
+            if p_no and p_no not in candidates: candidates.append(p_no)
             
             edm_list = []
             for key_no in candidates:
-                req_body = {"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}
                 try:
-                    res = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
-                    if res.status_code == 200:
-                        json_data = res.json()
-                        if json_data.get("success") and json_data.get("data"):
-                            edm_list = json_data.get("data")
-                            break
-                except Exception:
-                    pass
+                    res = requests.post(edm_api_url, headers=headers, json={"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}, timeout=10)
+                    if res.status_code == 200 and res.json().get("success") and res.json().get("data"):
+                        edm_list = res.json().get("data")
+                        break
+                except Exception: pass
             
-            if not edm_list:
-                zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"전표번호({candidates})에 해당하는 EDM 증빙이 없습니다.".encode('utf-8'))
-            else:
+            if edm_list:
                 for idx, edm in enumerate(edm_list, 1):
-                    real_filename = edm.get("filename", f"document_{idx}.pdf")
                     download_url = edm.get("downloadurl", "")
-                    
                     if download_url:
-                        if download_url.startswith("/"):
-                            download_url = SAMSAPI_BASE_URL + download_url
-                            
+                        if download_url.startswith("/"): download_url = SAMSAPI_BASE_URL + download_url
                         try:
                             file_res = requests.get(download_url, headers=headers, timeout=30)
                             if file_res.status_code == 200:
-                                new_filename = f"{counter}_{clean_vendor}_{real_filename}"
-                                zip_file.writestr(new_filename, file_res.content)
-                        except Exception:
-                            pass
+                                zip_file.writestr(f"{counter}_{clean_vendor}_{edm.get('filename', f'doc_{idx}.pdf')}", file_res.content)
+                        except Exception: pass
+            else:
+                zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"시도된 키({candidates})에 매핑된 EDM 파일이 없습니다.".encode('utf-8'))
             counter += 1
                 
     zip_buffer.seek(0)
