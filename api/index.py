@@ -11,10 +11,18 @@ from pydantic import BaseModel, Field
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, borders
 
+import docx
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
+
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (BNK 부산은행 외화송금신청서 양식 자동 생성 탑재)",
-    version="16.0.0"
+    description="SamsApi 실시간 연동 (전표번호/확정전표번호/미결번호 3단계 EDM 자동 탐색)",
+    version="19.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -52,6 +60,11 @@ def calculate_payment_date(occur_date_str: str, request_date_str: str, vendor_na
     days_to_add_map = {0: 1, 1: 0, 2: 2, 3: 1, 4: 0, 5: 3, 6: 2}
     return (base_target_dt + timedelta(days=days_to_add_map[weekday])).strftime("%Y-%m-%d")
 
+def set_cell_margins(cell, top=60, bottom=60, left=100, right=100):
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = parse_xml(f'<w:tcMar {nsdecls("w")}><w:top w:w="{top}" w:type="dxa"/><w:bottom w:w="{bottom}" w:type="dxa"/><w:left w:w="{left}" w:type="dxa"/><w:right w:w="{right}" w:type="dxa"/></w:tcMar>')
+    tcPr.append(tcMar)
+
 class PendingSearchQuery(BaseModel):
     branch_code: str = Field(default="본사")
     start_date: Optional[str] = None
@@ -73,9 +86,9 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "STEEM1960 SINGAPORE PTE LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "confirmed_voucher_no": "VC20260622-0045"},
-        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012"},
-        {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "confirmed_voucher_no": "LN-001"}
+        {"pending_no": "APS202607130008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007449", "vendor_name": "MARINA SHIPBROKERS INI", "occur_date": "2026-06-30", "acc_date": "2026-06-30", "payment_request_date": "2026-07-13", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "journal_no": "S202607130012", "confirmed_voucher_no": "S202606300192"},
+        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "journal_no": "VC20260607-0012", "confirmed_voucher_no": "VC20260607-0012"},
+        {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "journal_no": "LN-001", "confirmed_voucher_no": "LN-001"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -133,7 +146,9 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                         "occur_date": from_dt, "acc_date": from_dt,
                         "payment_request_date": to_dt, "currency": raw.get("currency_code", "KRW"), "exchange_rate": 1.0,
                         "occur_amount": loan_amount, "balance_amount": balance_amount, "krw_balance": balance_amount,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", "")
+                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
+                        "journal_no": raw.get("journal_number", ""),
+                        "confirmed_voucher_no": raw.get("group_settled_number", "")
                     })
                 return parsed_items
             else: return []
@@ -189,7 +204,9 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                         "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": occur_date,
                         "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
                         "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", "")
+                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
+                        "journal_no": raw.get("journal_number", ""),
+                        "confirmed_voucher_no": raw.get("group_settled_number", "")
                     })
                 return parsed_items
             else: return []
@@ -253,12 +270,12 @@ def render_portal_ui():
             .navbar {{ background-color: #1a365d; }}
             .card {{ border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
             .table-responsive {{ overflow-x: auto; }}
-            .resizable-table {{ table-layout: fixed; width: 100%; min-width: 1200px; border-collapse: collapse; }}
+            .resizable-table {{ table-layout: fixed; width: 100%; min-width: 1350px; border-collapse: collapse; }}
             .resizable-table th {{ position: relative; background-color: #2b4c7e; color: white; padding: 10px; border: 1px solid #dee2e6; user-select: none; }}
             .resizer {{ width: 6px; height: 100%; position: absolute; right: 0; top: 0; cursor: col-resize; z-index: 1; }}
             .resizer:hover, .resizer.resizing {{ background-color: #ffc107; border-right: 2px solid #e0a800; }}
             .btn-excel {{ background-color: #1d6f42; color: white; }}
-            .btn-remit {{ background-color: #c0392b; color: white; }} /* 부산은행 외화송금신청서 전용 버건디 버튼 */
+            .btn-remit {{ background-color: #c0392b; color: white; }}
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
             .bg-summary {{ background-color: #fffbeb; }}
@@ -268,7 +285,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">BNK 부산은행 외화송금신청서 양식 탑재 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호/확정전표번호 매핑 및 EDM 3단계 연동 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -326,7 +343,7 @@ def render_portal_ui():
 
                 <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label>
-                    <input type="text" class="form-control" id="vendorCode" placeholder="예: KB국민은행">
+                    <input type="text" class="form-control" id="vendorCode" placeholder="예: MARINA SHIPBROKERS">
                 </div>
                 <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">미결/차입 번호</label>
@@ -338,30 +355,32 @@ def render_portal_ui():
                 <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
                 <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">리스트(엑셀)</button>
-                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">🏛️ BNK 외화송금신청서(엑셀)</button>
+                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">📄 BNK 외화송금신청서(워드)</button>
                 <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">선택항목 증빙 ZIP</button>
             </div>
         </div>
 
         <div class="card p-3 mb-4">
             <div class="table-responsive">
-                <table class="table table-hover align-middle border text-center resizable-table" style="font-size: 0.9rem;" id="pendingTable">
+                <table class="table table-hover align-middle border text-center resizable-table" style="font-size: 0.88rem;" id="pendingTable">
                     <thead>
                         <tr>
-                            <th style="width: 50px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)" title="전체 선택"></th>
-                            <th style="width: 160px;">미결/차입번호</th>
-                            <th style="width: 140px;">계정/차입구분</th>
-                            <th style="width: 180px;">거래처/금융기관</th>
-                            <th style="width: 80px;">통화</th>
-                            <th style="width: 120px;">외화(원화잔액)</th>
-                            <th style="width: 140px;">원화환산액</th>
-                            <th style="width: 110px;">자동산정일</th>
-                            <th style="width: 150px; background-color: #1b5e20;">지불/만기예정일(수정)</th>
-                            <th style="width: 80px;">저장</th>
+                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)" title="전체 선택"></th>
+                            <th style="width: 155px;">미결/차입번호</th>
+                            <th style="width: 130px;">전표번호</th>
+                            <th style="width: 130px;">확정전표번호</th>
+                            <th style="width: 130px;">계정/차입구분</th>
+                            <th style="width: 160px;">거래처/금융기관</th>
+                            <th style="width: 70px;">통화</th>
+                            <th style="width: 110px;">외화(원화잔액)</th>
+                            <th style="width: 130px;">원화환산액</th>
+                            <th style="width: 100px;">자동산정일</th>
+                            <th style="width: 140px; background-color: #1b5e20;">지불/만기예정일(수정)</th>
+                            <th style="width: 70px;">저장</th>
                         </tr>
                     </thead>
                     <tbody id="pendingTableBody">
-                        <tr><td colspan="10" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>
+                        <tr><td colspan="12" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -439,7 +458,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
                 summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
                 
                 try {{
@@ -450,11 +469,11 @@ def render_portal_ui():
                     let data = JSON.parse(text);
                     
                     if(data.length > 0 && data[0].error_msg) {{
-                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold fs-5">${{data[0].error_msg}}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="12" class="py-4 text-danger fw-bold fs-5">${{data[0].error_msg}}</td></tr>`;
                          return;
                     }}
                     if(data.length === 0) {{
-                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">검색 조건에 일치하는 데이터가 없습니다.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-muted fw-bold">검색 조건에 일치하는 데이터가 없습니다.</td></tr>';
                         return;
                     }}
 
@@ -469,11 +488,13 @@ def render_portal_ui():
                         tr.innerHTML = `
                             <td><input type="checkbox" class="row-chk form-check-input" value="${{item.pending_no}}"></td>
                             <td class="text-primary fw-bold text-break">${{item.pending_no}}</td>
+                            <td class="text-secondary fw-bold text-break">${{item.journal_no || '-'}}</td>
+                            <td class="text-dark fw-bold text-break">${{item.confirmed_voucher_no || '-'}}</td>
                             <td class="text-break"><span class="badge bg-light text-dark border">${{item.account_name || item.account_code}}</span></td>
                             <td class="fw-bold text-break">${{item.vendor_name}}</td>
                             <td><span class="badge ${{curr === 'KRW' ? 'bg-secondary' : 'bg-danger'}}">${{curr}}</span></td>
-                            <td class="text-end pe-3 text-break">${{Number(item.balance_amount).toLocaleString()}}</td>
-                            <td class="fw-bold text-end pe-3 text-break">${{Number(item.krw_balance).toLocaleString()}} 원</td>
+                            <td class="text-end pe-2 text-break">${{Number(item.balance_amount).toLocaleString()}}</td>
+                            <td class="fw-bold text-end pe-2 text-break">${{Number(item.krw_balance).toLocaleString()}} 원</td>
                             <td><span class="text-muted">${{item.auto_payment_date}}</span></td>
                             <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${{item.pending_no}}" value="${{item.scheduled_payment_date}}"></td>
                             <td><button class="btn btn-sm btn-success fw-bold w-100" onclick="saveDate('${{item.pending_no}}')">저장</button></td>
@@ -482,11 +503,11 @@ def render_portal_ui():
                     }});
                     for(const [curr, amounts] of Object.entries(summary)) {{
                         const tr = document.createElement("tr");
-                        tr.innerHTML = `<td class="fw-bold text-primary" colspan="2">${{curr}}</td><td class="text-end pe-4 fw-bold" colspan="8">${{Number(amounts.krw).toLocaleString()}} 원</td>`;
+                        tr.innerHTML = `<td class="fw-bold text-primary" colspan="2">${{curr}}</td><td class="text-end pe-4 fw-bold" colspan="10">${{Number(amounts.krw).toLocaleString()}} 원</td>`;
                         summaryBody.appendChild(tr);
                     }}
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
-                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
+                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="12" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
             }}
             
             async function saveDate(pendingNo) {{
@@ -512,7 +533,7 @@ def render_portal_ui():
                 payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
 
                 fetch('/api/pending/export-remittance-form', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `BNK_부산은행_외화송금신청서.xlsx`; a.click(); }});
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `BNK_부산은행_외화송금신청서.docx`; a.click(); }});
             }}
             
             function downloadEdmZip() {{
@@ -523,12 +544,12 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "전표 증빙 원본 다운로드 중...";
+                btn.innerText = "3단계 이중검색 다운로드 중...";
                 btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
-                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_전표_EDM증빙자료.zip`; a.click(); 
+                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_전표_EDM증빙자료_디버그.zip`; a.click(); 
                     btn.innerText = originalText; btn.disabled = false;
                 }}).catch(() => {{ 
                     alert("다운로드 중 오류가 발생했습니다."); 
@@ -564,201 +585,179 @@ def save_payment_date(payload: PaymentDateSaveRequest):
 def export_plan_excel(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "전체_리스트"
-    ws.append(["지불/만기예정일", "미결/차입번호", "계정/차입구분", "거래처/금융기관", "통화", "환율", "발생/차입금액", "원화환산액", "자동산정일"])
+    ws.append(["지불/만기예정일", "미결/차입번호", "전표번호", "확정전표번호", "계정/차입구분", "거래처/금융기관", "통화", "환율", "발생/차입금액", "원화환산액", "자동산정일"])
     for cell in ws[1]: cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid"); cell.font = Font(color="FFFFFF", bold=True); cell.alignment = Alignment(horizontal="center")
     for row in filtered_data:
         if row.get("error_msg"): continue
-        ws.append([row["scheduled_payment_date"], row["pending_no"], row.get("account_name", ""), row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
+        ws.append([row["scheduled_payment_date"], row["pending_no"], row.get("journal_no", ""), row.get("confirmed_voucher_no", ""), row.get("account_name", ""), row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
     stream = io.BytesIO(); wb.save(stream); stream.seek(0)
     return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=List.xlsx"})
 
-# 🚨 [BNK 부산은행 외화송금신청서 서식 100% 동일 구현]
 @app.post("/api/pending/export-remittance-form")
 def export_remittance_form(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
-    
     if payload.selected_pending_nos:
         filtered_data = [item for item in filtered_data if item["pending_no"] in payload.selected_pending_nos]
 
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active) # 기본 시트 제거
+    doc = Document()
+    for section in doc.sections:
+        section.top_margin = Inches(0.4)
+        section.bottom_margin = Inches(0.4)
+        section.left_margin = Inches(0.4)
+        section.right_margin = Inches(0.4)
 
-    thin_border = borders.Border(
-        left=borders.Side(style='thin'), right=borders.Side(style='thin'),
-        top=borders.Side(style='thin'), bottom=borders.Side(style='thin')
-    )
-    thick_bottom = borders.Border(bottom=borders.Side(style='medium'))
-    
-    label_font = Font(name='맑은 고딕', size=9, bold=True)
-    val_font = Font(name='맑은 고딕', size=10, bold=True)
-    small_font = Font(name='맑은 고딕', size=8)
+    for idx, item in enumerate(filtered_data):
+        if idx > 0: doc.add_page_break()
 
-    for idx, item in enumerate(filtered_data, 1):
-        clean_name = item.get("vendor_name", f"건별_{idx}").replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')[:20]
-        ws = wb.create_sheet(title=f"{idx}_{clean_name}")
-        ws.views.sheetView[0].showGridLines = True
-
-        # 1. 헤더 (BNK 부산은행 로고 & 제목)
-        ws.merge_cells("A1:D1")
-        ws["A1"] = "외화송금신청서"
-        ws["A1"].font = Font(name='맑은 고딕', size=16, bold=True)
-        ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+        header_table = doc.add_table(rows=1, cols=2)
+        header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
         
-        ws.merge_cells("A2:D2")
-        ws["A2"] = "APPLICATION FOR REMITTANCE"
-        ws["A2"].font = Font(name='맑은 고딕', size=11, bold=True)
+        cell_l = header_table.cell(0, 0)
+        p_l = cell_l.paragraphs[0]
+        run_l1 = p_l.add_run("외화송금신청서\n")
+        run_l1.font.name = '맑은 고딕'; run_l1.font.size = Pt(16); run_l1.font.bold = True
+        run_l2 = p_l.add_run("APPLICATION FOR REMITTANCE")
+        run_l2.font.name = '맑은 고딕'; run_l2.font.size = Pt(10); run_l2.font.bold = True
 
-        ws.merge_cells("E1:F1")
-        ws["E1"] = "BNK 부산은행"
-        ws["E1"].font = Font(name='맑은 고딕', size=14, bold=True, color="C0392B")
-        ws["E1"].alignment = Alignment(horizontal="right", vertical="center")
-        
-        ws["G1"] = "은행용"
-        ws["G1"].font = Font(name='맑은 고딕', size=9, bold=True, color="FFFFFF")
-        ws["G1"].fill = PatternFill(start_color="C0392B", end_color="C0392B", fill_type="solid")
-        ws["G1"].alignment = Alignment(horizontal="center", vertical="center")
+        cell_r = header_table.cell(0, 1)
+        p_r = cell_r.paragraphs[0]
+        p_r.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run_r = p_r.add_run("BNK 부산은행  [은행용]")
+        run_r.font.name = '맑은 고딕'; run_r.font.size = Pt(13); run_r.font.bold = True
+        run_r.font.color.rgb = RGBColor(192, 57, 43)
 
-        ws.merge_cells("A3:G3")
-        ws["A3"] = "지급신청서 및 거래외국환은행 지정확인(신청)서 겸용 Request for designation of correspondent foreign exchange bank and foreign exchange payment"
-        ws["A3"].font = small_font
-        ws["A3"].alignment = Alignment(horizontal="left", vertical="center")
+        p_sub = doc.add_paragraph()
+        run_sub = p_sub.add_run("지급신청서 및 거래외국환은행 지정확인(신청)서 겸용 Request for designation of correspondent foreign exchange bank and foreign exchange payment")
+        run_sub.font.name = '맑은 고딕'; run_sub.font.size = Pt(7.5)
 
-        # 2. 신청인 (Applicant) 섹션
-        ws.merge_cells("A4:A6")
-        ws["A4"] = "신\n청\n인"
-        ws["A4"].font = label_font
-        ws["A4"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        table = doc.add_table(rows=16, cols=6)
+        table.style = 'Table Grid'
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-        ws["B4"] = "성명 (법인명)\nApplicant"
-        ws["B4"].font = small_font; ws["B4"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws["C4"] = "한글"; ws["C4"].font = small_font; ws["C4"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["D4"] = "흥아해운(주)"; ws["D4"].font = val_font; ws["D4"].alignment = Alignment(horizontal="left", vertical="center")
-        ws["E4"] = "영문"; ws["E4"].font = small_font; ws["E4"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("F4:G4")
-        ws["F4"] = "Heung-A Shipping Co.,Ltd."; ws["F4"].font = val_font; ws["F4"].alignment = Alignment(horizontal="left", vertical="center")
+        col_widths = [Inches(0.5), Inches(1.4), Inches(1.3), Inches(2.2), Inches(1.2), Inches(1.2)]
+        for row in table.rows:
+            for i, w in enumerate(col_widths): row.cells[i].width = w
 
-        ws.merge_cells("B5:C5")
-        ws["B5"] = "사업자등록번호"
-        ws["B5"].font = small_font; ws["B5"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D5:G5")
-        ws["D5"] = "120-81-62522"; ws["D5"].font = val_font; ws["D5"].alignment = Alignment(horizontal="left", vertical="center")
+        table.cell(0, 0).merge(table.cell(2, 0))
+        table.cell(0, 0).text = "신\n청\n인"
+        table.cell(0, 1).text = "성명 (법인명)\nApplicant"
+        table.cell(0, 2).text = "한글: 흥아해운(주)"
+        table.cell(0, 3).merge(table.cell(0, 5))
+        table.cell(0, 3).text = "영문: Heung-A Shipping Co.,Ltd."
 
-        ws.merge_cells("B6:C6")
-        ws["B6"] = "주소"; ws["B6"].font = small_font; ws["B6"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D6:G6")
-        ws["D6"] = "서울특별시 중구 청계천로 8, 5층 (프리미어플레이스)"
-        ws["D6"].font = val_font; ws["D6"].alignment = Alignment(horizontal="left", vertical="center")
+        table.cell(1, 1).merge(table.cell(1, 2))
+        table.cell(1, 1).text = "사업자등록번호"
+        table.cell(1, 3).merge(table.cell(1, 5))
+        table.cell(1, 3).text = "120-81-62522"
 
-        # 3. 신청내용 (Application Details) 섹션
-        ws.merge_cells("A7:A19")
-        ws["A7"] = "신\n청\n내\n용"
-        ws["A7"].font = label_font; ws["A7"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        table.cell(2, 1).merge(table.cell(2, 2))
+        table.cell(2, 1).text = "주소"
+        table.cell(2, 3).merge(table.cell(2, 5))
+        table.cell(2, 3).text = "서울특별시 중구 청계천로 8, 5층 (프리미어플레이스)"
 
-        ws.merge_cells("B7:C7")
-        ws["B7"] = "약식송금신청"; ws["B7"].font = label_font; ws["B7"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D7:G7"); ws["D7"] = ""
+        table.cell(3, 0).merge(table.cell(15, 0))
+        table.cell(3, 0).text = "신\n청\n내\n용"
 
-        ws.merge_cells("B8:C8")
-        ws["B8"] = "송금방법 (Type)"; ws["B8"].font = small_font; ws["B8"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D8:G8")
-        ws["D8"] = "■ 해외송금(일반,약식)  □ 중국원화(CNY)송금  □ 타행환송금  □ 국내외화송금"
-        ws["D8"].font = small_font; ws["D8"].alignment = Alignment(horizontal="left", vertical="center")
+        table.cell(3, 1).merge(table.cell(3, 2))
+        table.cell(3, 1).text = "약식송금신청"
+        table.cell(3, 3).merge(table.cell(3, 5))
+        table.cell(3, 3).text = ""
 
-        ws.merge_cells("B9:C9")
-        ws["B9"] = "송금신청액(Amount)"; ws["B9"].font = small_font; ws["B9"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["D9"] = f"통화: {item.get('currency', 'USD')}"; ws["D9"].font = val_font; ws["D9"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("E9:F9")
-        ws["E9"] = f"금액: {item.get('balance_amount', 0):,.2f}"; ws["E9"].font = val_font; ws["E9"].alignment = Alignment(horizontal="right", vertical="center")
-        ws["G9"] = "미화상당액:"; ws["G9"].font = small_font; ws["G9"].alignment = Alignment(horizontal="left", vertical="center")
+        table.cell(4, 1).merge(table.cell(4, 2))
+        table.cell(4, 1).text = "송금방법 (Type)"
+        table.cell(4, 3).merge(table.cell(4, 5))
+        table.cell(4, 3).text = "■ 해외송금(일반,약식)  □ 중국원화(CNY)송금  □ 타행환송금  □ 국내외화송금"
 
-        # 수취인
-        ws.merge_cells("B10:B12")
-        ws["B10"] = "수취인\n(Beneficiary)"; ws["B10"].font = small_font; ws["B10"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws["C10"] = "성명(업체명)"; ws["C10"].font = small_font; ws["C10"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D10:E10")
-        ws["D10"] = item.get("vendor_name", ""); ws["D10"].font = val_font; ws["D10"].alignment = Alignment(horizontal="left", vertical="center")
-        ws["F10"] = "신청인과의 관계"; ws["F10"].font = small_font; ws["F10"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["G10"] = ""; ws["G10"].font = val_font
+        table.cell(5, 1).merge(table.cell(5, 2))
+        table.cell(5, 1).text = "송금신청액(Amount)"
+        table.cell(5, 3).text = f"통화: {item.get('currency', 'USD')}"
+        table.cell(5, 4).text = f"금액: {item.get('balance_amount', 0):,.2f}"
+        table.cell(5, 5).text = "미화상당액:"
 
-        ws["C11"] = "주소"; ws["C11"].font = small_font; ws["C11"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D11:G11"); ws["D11"] = ""; ws["D11"].font = val_font
+        table.cell(6, 1).merge(table.cell(8, 1))
+        table.cell(6, 1).text = "수취인\n(Beneficiary)"
+        table.cell(6, 2).text = "성명(업체명)"
+        table.cell(6, 3).text = item.get("vendor_name", "")
+        table.cell(6, 4).text = "신청인과의 관계"
+        table.cell(6, 5).text = ""
 
-        ws["C12"] = "국적"; ws["C12"].font = small_font; ws["C12"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["D12"] = "SINGAPORE" if "SINGAPORE" in item.get("vendor_name", "").upper() else ""; ws["D12"].font = val_font; ws["D12"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("E12:F12")
-        ws["E12"] = "중국CNY송금시 신분증 번호"; ws["E12"].font = small_font; ws["E12"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["G12"] = ""; ws["G12"].font = val_font
+        table.cell(7, 2).text = "주소"
+        table.cell(7, 3).merge(table.cell(7, 5))
+        table.cell(7, 3).text = ""
 
-        # 수취거래은행
-        ws.merge_cells("B13:B16")
-        ws["B13"] = "수취거래은행\n(Beneficiary's\nBank)"; ws["B13"].font = small_font; ws["B13"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws["C13"] = "SWIFT BIC"; ws["C13"].font = small_font; ws["C13"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D13:E13")
-        ws["D13"] = "OCBCSGSG" if "TIME" in item.get("vendor_name", "") else ""; ws["D13"].font = val_font; ws["D13"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["F13"] = "은행코드"; ws["F13"].font = small_font; ws["F13"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["G13"] = ""; ws["G13"].font = val_font
+        table.cell(8, 2).text = "국적"
+        table.cell(8, 3).text = "SINGAPORE" if "SINGAPORE" in item.get("vendor_name", "").upper() else ""
+        table.cell(8, 4).text = "중국CNY신분증"
+        table.cell(8, 5).text = ""
 
-        ws["C14"] = "계좌번호"; ws["C14"].font = small_font; ws["C14"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D14:G14")
-        ws["D14"] = "503344509301" if "TIME" in item.get("vendor_name", "") else ""; ws["D14"].font = val_font; ws["D14"].alignment = Alignment(horizontal="left", vertical="center")
+        table.cell(9, 1).merge(table.cell(12, 1))
+        table.cell(9, 1).text = "수취거래은행\n(Beneficiary's Bank)"
+        table.cell(9, 2).text = "SWIFT BIC"
+        table.cell(9, 3).text = "OCBCSGSG" if "MARINA" in item.get("vendor_name", "").upper() else ""
+        table.cell(9, 4).text = "은행코드"
+        table.cell(9, 5).text = ""
 
-        ws["C15"] = "은행명"; ws["C15"].font = small_font; ws["C15"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D15:G15")
-        ws["D15"] = "OCBC BANK, SINGAPORE" if "TIME" in item.get("vendor_name", "") else ""; ws["D15"].font = val_font; ws["D15"].alignment = Alignment(horizontal="left", vertical="center")
+        table.cell(10, 2).text = "계좌번호"
+        table.cell(10, 3).merge(table.cell(10, 5))
+        table.cell(10, 3).text = "503344509301" if "MARINA" in item.get("vendor_name", "").upper() else ""
 
-        ws["C16"] = "은행주소"; ws["C16"].font = small_font; ws["C16"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D16:G16"); ws["D16"] = ""; ws["D16"].font = val_font
+        table.cell(11, 2).text = "은행명"
+        table.cell(11, 3).merge(table.cell(11, 5))
+        table.cell(11, 3).text = "OCBC BANK, SINGAPORE" if "MARINA" in item.get("vendor_name", "").upper() else ""
 
-        # 송금사유 및 기타
-        ws.merge_cells("B17:C17")
-        ws["B17"] = "송금사유"; ws["B17"].font = small_font; ws["B17"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["D17"] = f"{datetime.today().strftime('%y%m%d')}_송금({item.get('pending_no', '')})"; ws["D17"].font = val_font; ws["D17"].alignment = Alignment(horizontal="left", vertical="center")
-        ws["E17"] = "수수료부담\n(Charges)"; ws["E17"].font = small_font; ws["E17"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.merge_cells("F17:G17")
-        ws["F17"] = "각자부담 ■ (Applicant / Beneficiary)"; ws["F17"].font = small_font; ws["F17"].alignment = Alignment(horizontal="center", vertical="center")
+        table.cell(12, 2).text = "은행주소"
+        table.cell(12, 3).merge(table.cell(12, 5))
+        table.cell(12, 3).text = ""
 
-        ws.merge_cells("B18:C18")
-        ws["B18"] = "수입대금의 경우"; ws["B18"].font = small_font; ws["B18"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["D18"] = "H.S. code:"; ws["D18"].font = small_font; ws["D18"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("E18:F18")
-        ws["E18"] = "L/C or 계약서 NO:"; ws["E18"].font = small_font; ws["E18"].alignment = Alignment(horizontal="center", vertical="center")
-        ws["G18"] = "대응수입예정일"; ws["G18"].font = small_font; ws["G18"].alignment = Alignment(horizontal="center", vertical="center")
+        table.cell(13, 1).merge(table.cell(13, 2))
+        table.cell(13, 1).text = "송금사유"
+        table.cell(13, 3).text = f"{datetime.today().strftime('%y%m%d')}_송금({item.get('pending_no', '')})"
+        table.cell(13, 4).text = "수수료부담 (Charges)"
+        table.cell(13, 5).text = "각자부담 ■"
 
-        ws.merge_cells("B19:C18")
-        ws["B19"] = "중간경유은행"; ws["B19"].font = small_font; ws["B19"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("D19:D19"); ws["D19"] = ""
-        ws["E19"] = "기타통지사항"; ws["E19"].font = small_font; ws["E19"].alignment = Alignment(horizontal="center", vertical="center")
-        ws.merge_cells("F19:G19"); ws["F19"] = ""
+        table.cell(14, 1).merge(table.cell(14, 2))
+        table.cell(14, 1).text = "수입대금의 경우"
+        table.cell(14, 3).text = "H.S. code:"
+        table.cell(14, 4).text = "L/C or 계약서 NO:"
+        table.cell(14, 5).text = "대응수입예정일:"
 
-        # 테두리 일괄 적용 (4행~19행)
-        for r in range(4, 20):
-            for c in range(1, 8):
-                ws.cell(row=r, column=c).border = thin_border
+        table.cell(15, 1).merge(table.cell(15, 2))
+        table.cell(15, 1).text = "중간경유은행"
+        table.cell(15, 3).text = ""
+        table.cell(15, 4).text = "기타통지사항"
+        table.cell(15, 5).text = ""
 
-        # 4. 하단 서약 및 서명란
-        ws.merge_cells("A20:G20")
-        ws["A20"] = "■ 본인은 귀행 영업점에 비치된 「외환거래기본약관」 및 「전자금융외화송금거래약관」을 열람하고 그 내용에 따를 것을 확약하며 신청합니다."
-        ws["A20"].font = Font(name='맑은 고딕', size=8, bold=True)
+        for row in table.rows:
+            for cell in row.cells:
+                set_cell_margins(cell, top=50, bottom=50, left=80, right=80)
+                for p in cell.paragraphs:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for r in p.runs:
+                        r.font.name = '맑은 고딕'; r.font.size = Pt(8.5)
 
-        ws.merge_cells("A21:E21")
-        ws["A21"] = "■ 본 거래는 미국, UN, EU등이 정한 경제제재 대상자 또는 국가와 관련이 없음을 확인합니다."
-        ws["A21"].font = Font(name='맑은 고딕', size=8)
+        p_b1 = doc.add_paragraph()
+        run_b1 = p_b1.add_run("■ 본인은 귀행 영업점에 비치된 「외환거래기본약관」 및 「전자금융외화송금거래약관」을 열람하고 그 내용에 따를 것을 확약하며 신청합니다.")
+        run_b1.font.name = '맑은 고딕'; run_b1.font.size = Pt(8); run_b1.font.bold = True
 
-        ws.merge_cells("F21:G21")
-        ws["F21"] = "예금주명: 흥아해운(주) (인)"
-        ws["F21"].font = Font(name='맑은 고딕', size=10, bold=True)
-        ws["F21"].alignment = Alignment(horizontal="right", vertical="center")
+        p_b2 = doc.add_paragraph()
+        run_b2 = p_b2.add_run("■ 본 거래는 미국, UN, EU등이 정한 경제제재 대상자 또는 국가와 관련이 없음을 확인합니다.\n")
+        run_b2.font.name = '맑은 고딕'; run_b2.font.size = Pt(8)
 
-        # 열 너비 세팅
-        col_widths = {'A': 4, 'B': 16, 'C': 18, 'D': 25, 'E': 16, 'F': 20, 'G': 18}
-        for col, w in col_widths.items(): ws.column_dimensions[col].width = w
+        p_sig = doc.add_paragraph()
+        p_sig.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run_sig = p_sig.add_run("예금주명: 흥아해운(주) (인)")
+        run_sig.font.name = '맑은 고딕'; run_sig.font.size = Pt(11); run_sig.font.bold = True
 
     stream = io.BytesIO()
-    wb.save(stream)
+    doc.save(stream)
     stream.seek(0)
-    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.xlsx"})
+    return Response(
+        content=stream.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
+    )
 
-# 🚨 [전표번호 최우선 적용 EDM 원본 다운로드]
+# 🚨 [EDM 3단계 자동 탐색다운로드]
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -774,41 +773,67 @@ def export_edm_zip(payload: PendingSearchQuery):
             if item.get("error_msg"): continue
             if payload.selected_pending_nos and item["pending_no"] not in payload.selected_pending_nos: continue
             
-            if payload.use_mock:
-                dummy_pdf = base64.b64decode("JVBERi0xLjQKJfbkwzEAMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iaiAyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iaiAzIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDQgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PiA+PiA+PiA+PgplbmRvYmogNCAwIG9iago8PCAvTGVuZ3RoIDUzID4+CnN0cmVhbQpCVCAvRjEgMTIgVGYgNTAgNzAwIFRkIChFRE0gU2FtcGxlIERvY3VtZW50KSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA1CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSA0MDAwMCBuIAowMDAwMDAwMDY4IDAwMDAwIG4gCjAwMDAwMDAxMjUgMDAwMDAgbiAKMDAwMDAwMDI3MyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDUgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM3NgolJUVPRgo=")
-                clean_vendor = item['vendor_name'].replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
-                zip_file.writestr(f"{counter}_{clean_vendor}_MOCK_FILE.pdf", dummy_pdf)
-                counter += 1
-                continue
-                
-            voucher_no = str(item.get("confirmed_voucher_no") or item.get("pending_no") or "").strip()
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             
-            req_body = {"company_code": "HASL", "journal_number": voucher_no, "language_gubun": "KO"}
+            # 🚨 3가지 후보 키 준비 (1순위: 전표번호, 2순위: 확정전표번호, 3순위: 미결번호)
+            candidates = []
+            j_no = str(item.get("journal_no") or "").strip()
+            v_no = str(item.get("confirmed_voucher_no") or "").strip()
+            p_no = str(item.get("pending_no") or "").strip()
             
-            try:
-                res = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
-                edm_list = res.json().get("data", []) if res.status_code == 200 and res.json().get("success") else []
-
-                if not edm_list:
-                    zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"SAMSAPI 서버(전표번호: {voucher_no})에 증빙 파일이 없습니다.".encode('utf-8'))
-                else:
-                    for edm in edm_list:
-                        real_filename = edm.get("filename", f"document_{counter}.pdf")
-                        download_url = edm.get("downloadurl", "")
-                        
-                        if download_url:
-                            if download_url.startswith("/"):
-                                download_url = SAMSAPI_BASE_URL + download_url
-                                
-                            file_res = requests.get(download_url, headers=headers, timeout=20)
+            if j_no: candidates.append(j_no)
+            if v_no and v_no not in candidates: candidates.append(v_no)
+            if p_no and p_no not in candidates: candidates.append(p_no)
+            
+            edm_list = []
+            debug_logs = [f"=== EDM 증빙 다운로드 3단계 탐색 리포트 ===", f"거래처: {clean_vendor}", f"후보 키: {candidates}", ""]
+            
+            for key_no in candidates:
+                req_body = {"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}
+                debug_logs.append(f"[시도] 키워드 '{key_no}'로 EDM 조회 중...")
+                try:
+                    res = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
+                    debug_logs.append(f" - HTTP 응답코드: {res.status_code}")
+                    if res.status_code == 200:
+                        json_data = res.json()
+                        debug_logs.append(f" - 응답데이터: {json_data}")
+                        if json_data.get("success") and json_data.get("data"):
+                            edm_list = json_data.get("data")
+                            debug_logs.append(f" => 성공! '{key_no}'에서 {len(edm_list)}개 파일 발견.")
+                            break
+                        else:
+                            debug_logs.append(" => 해당 키에는 매핑된 파일이 없습니다.")
+                    else:
+                        debug_logs.append(f" - 에러 메시지: {res.text}")
+                except Exception as e:
+                    debug_logs.append(f" - 호출 실패 예외: {str(e)}")
+            
+            if not edm_list:
+                debug_logs.append("\n[결과] 준비된 모든 키(전표/확정전표/미결)로 탐색했으나 파일이 없습니다.")
+                zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음_원인분석.txt", "\n".join(debug_logs).encode('utf-8'))
+            else:
+                for idx, edm in enumerate(edm_list, 1):
+                    real_filename = edm.get("filename", f"document_{idx}.pdf")
+                    download_url = edm.get("downloadurl", "")
+                    
+                    if download_url:
+                        if download_url.startswith("/"):
+                            download_url = SAMSAPI_BASE_URL + download_url
+                            
+                        try:
+                            file_res = requests.get(download_url, headers=headers, timeout=30)
                             if file_res.status_code == 200:
                                 new_filename = f"{counter}_{clean_vendor}_{real_filename}"
                                 zip_file.writestr(new_filename, file_res.content)
-                        counter += 1
-            except Exception as e:
-                zip_file.writestr(f"{counter}_{clean_vendor}_다운로드오류.txt", f"EDM API 연결 실패: {str(e)}".encode('utf-8'))
-                counter += 1
+                                debug_logs.append(f" -> '{real_filename}' 저장 완료")
+                            else:
+                                debug_logs.append(f" -> 다운로드 실패 (HTTP {file_res.status_code})")
+                        except Exception as e:
+                            debug_logs.append(f" -> 다운로드 예외 발생: {str(e)}")
+                            
+                zip_file.writestr(f"{counter}_{clean_vendor}_다운로드성공_상세로그.txt", "\n".join(debug_logs).encode('utf-8'))
+            
+            counter += 1
                 
     zip_buffer.seek(0)
-    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=Real_EDM_Documents.zip"})
+    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=Real_EDM_Documents_Debug.zip"})
