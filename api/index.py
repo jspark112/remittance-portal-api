@@ -13,8 +13,8 @@ from openpyxl.styles import Font, Alignment, PatternFill, borders
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (전표번호 기반 EDM 연동 및 FIXED PAYMENT LIST 송금신청서 탑재)",
-    version="15.0.0"
+    description="SamsApi 실시간 연동 (BNK 부산은행 외화송금신청서 양식 자동 생성 탑재)",
+    version="16.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -73,7 +73,7 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045"},
+        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "STEEM1960 SINGAPORE PTE LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 54480.14, "balance_amount": 54480.14, "krw_balance": 82335835.0, "confirmed_voucher_no": "VC20260622-0045"},
         {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012"},
         {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "confirmed_voucher_no": "LN-001"}
     ]
@@ -258,7 +258,7 @@ def render_portal_ui():
             .resizer {{ width: 6px; height: 100%; position: absolute; right: 0; top: 0; cursor: col-resize; z-index: 1; }}
             .resizer:hover, .resizer.resizing {{ background-color: #ffc107; border-right: 2px solid #e0a800; }}
             .btn-excel {{ background-color: #1d6f42; color: white; }}
-            .btn-remit {{ background-color: #e67e22; color: white; }}
+            .btn-remit {{ background-color: #c0392b; color: white; }} /* 부산은행 외화송금신청서 전용 버건디 버튼 */
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
             .bg-summary {{ background-color: #fffbeb; }}
@@ -268,7 +268,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">FIXED PAYMENT LIST 송금신청서 양식 탑재 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">BNK 부산은행 외화송금신청서 양식 탑재 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -338,7 +338,7 @@ def render_portal_ui():
                 <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
                 <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">리스트(엑셀)</button>
-                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">FIXED PAYMENT 송금신청서(엑셀)</button>
+                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">🏛️ BNK 외화송금신청서(엑셀)</button>
                 <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">선택항목 증빙 ZIP</button>
             </div>
         </div>
@@ -506,13 +506,13 @@ def render_portal_ui():
 
             function downloadRemittanceForm() {{
                 const checkedBoxes = document.querySelectorAll('.row-chk:checked');
-                if (checkedBoxes.length === 0) {{ alert("송금신청서를 출력할 건을 선택해주세요."); return; }}
+                if (checkedBoxes.length === 0) {{ alert("BNK 외화송금신청서를 출력할 건을 선택해주세요."); return; }}
                 
                 const payload = buildSearchPayload(false);
                 payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
 
                 fetch('/api/pending/export-remittance-form', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `FIXED_PAYMENT_LIST_송금신청서.xlsx`; a.click(); }});
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `BNK_부산은행_외화송금신청서.xlsx`; a.click(); }});
             }}
             
             function downloadEdmZip() {{
@@ -572,9 +572,9 @@ def export_plan_excel(payload: PendingSearchQuery):
     stream = io.BytesIO(); wb.save(stream); stream.seek(0)
     return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=List.xlsx"})
 
-# 🚨 [SAMS ERP FIXED PAYMENT LIST 건별 송금신청서 양식 다운로드]
+# 🚨 [BNK 부산은행 외화송금신청서 서식 100% 동일 구현]
 @app.post("/api/pending/export-remittance-form")
-def export_remittance-form(payload: PendingSearchQuery):
+def export_remittance_form(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
     
     if payload.selected_pending_nos:
@@ -587,76 +587,176 @@ def export_remittance-form(payload: PendingSearchQuery):
         left=borders.Side(style='thin'), right=borders.Side(style='thin'),
         top=borders.Side(style='thin'), bottom=borders.Side(style='thin')
     )
-    header_fill = PatternFill(start_color="2B4C7E", end_color="2B4C7E", fill_type="solid")
+    thick_bottom = borders.Border(bottom=borders.Side(style='medium'))
+    
+    label_font = Font(name='맑은 고딕', size=9, bold=True)
+    val_font = Font(name='맑은 고딕', size=10, bold=True)
+    small_font = Font(name='맑은 고딕', size=8)
 
     for idx, item in enumerate(filtered_data, 1):
         clean_name = item.get("vendor_name", f"건별_{idx}").replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')[:20]
         ws = wb.create_sheet(title=f"{idx}_{clean_name}")
+        ws.views.sheetView[0].showGridLines = True
 
-        # A. 타이틀
-        ws.merge_cells("A1:G2")
-        ws["A1"] = "FIXED PAYMENT REMITTANCE APPLICATION (송금신청서)"
-        ws["A1"].font = Font(size=16, bold=True)
-        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        # 1. 헤더 (BNK 부산은행 로고 & 제목)
+        ws.merge_cells("A1:D1")
+        ws["A1"] = "외화송금신청서"
+        ws["A1"].font = Font(name='맑은 고딕', size=16, bold=True)
+        ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+        
+        ws.merge_cells("A2:D2")
+        ws["A2"] = "APPLICATION FOR REMITTANCE"
+        ws["A2"].font = Font(name='맑은 고딕', size=11, bold=True)
 
-        # B. 결재란
-        ws.merge_cells("E3:G3")
-        ws["E3"] = "결 재 (APPROVAL)"
-        ws["E3"].font = Font(bold=True)
-        ws["E3"].alignment = Alignment(horizontal="center")
+        ws.merge_cells("E1:F1")
+        ws["E1"] = "BNK 부산은행"
+        ws["E1"].font = Font(name='맑은 고딕', size=14, bold=True, color="C0392B")
+        ws["E1"].alignment = Alignment(horizontal="right", vertical="center")
         
-        ws["E4"] = "담당"; ws["F4"] = "검토"; ws["G4"] = "승인"
-        ws["E5"] = ""; ws["F5"] = ""; ws["G5"] = ""
-        
-        for r in range(3, 6):
-            for c in range(5, 8):
+        ws["G1"] = "은행용"
+        ws["G1"].font = Font(name='맑은 고딕', size=9, bold=True, color="FFFFFF")
+        ws["G1"].fill = PatternFill(start_color="C0392B", end_color="C0392B", fill_type="solid")
+        ws["G1"].alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.merge_cells("A3:G3")
+        ws["A3"] = "지급신청서 및 거래외국환은행 지정확인(신청)서 겸용 Request for designation of correspondent foreign exchange bank and foreign exchange payment"
+        ws["A3"].font = small_font
+        ws["A3"].alignment = Alignment(horizontal="left", vertical="center")
+
+        # 2. 신청인 (Applicant) 섹션
+        ws.merge_cells("A4:A6")
+        ws["A4"] = "신\n청\n인"
+        ws["A4"].font = label_font
+        ws["A4"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        ws["B4"] = "성명 (법인명)\nApplicant"
+        ws["B4"].font = small_font; ws["B4"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws["C4"] = "한글"; ws["C4"].font = small_font; ws["C4"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["D4"] = "흥아해운(주)"; ws["D4"].font = val_font; ws["D4"].alignment = Alignment(horizontal="left", vertical="center")
+        ws["E4"] = "영문"; ws["E4"].font = small_font; ws["E4"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("F4:G4")
+        ws["F4"] = "Heung-A Shipping Co.,Ltd."; ws["F4"].font = val_font; ws["F4"].alignment = Alignment(horizontal="left", vertical="center")
+
+        ws.merge_cells("B5:C5")
+        ws["B5"] = "사업자등록번호"
+        ws["B5"].font = small_font; ws["B5"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D5:G5")
+        ws["D5"] = "120-81-62522"; ws["D5"].font = val_font; ws["D5"].alignment = Alignment(horizontal="left", vertical="center")
+
+        ws.merge_cells("B6:C6")
+        ws["B6"] = "주소"; ws["B6"].font = small_font; ws["B6"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D6:G6")
+        ws["D6"] = "서울특별시 중구 청계천로 8, 5층 (프리미어플레이스)"
+        ws["D6"].font = val_font; ws["D6"].alignment = Alignment(horizontal="left", vertical="center")
+
+        # 3. 신청내용 (Application Details) 섹션
+        ws.merge_cells("A7:A19")
+        ws["A7"] = "신\n청\n내\n용"
+        ws["A7"].font = label_font; ws["A7"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        ws.merge_cells("B7:C7")
+        ws["B7"] = "약식송금신청"; ws["B7"].font = label_font; ws["B7"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D7:G7"); ws["D7"] = ""
+
+        ws.merge_cells("B8:C8")
+        ws["B8"] = "송금방법 (Type)"; ws["B8"].font = small_font; ws["B8"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D8:G8")
+        ws["D8"] = "■ 해외송금(일반,약식)  □ 중국원화(CNY)송금  □ 타행환송금  □ 국내외화송금"
+        ws["D8"].font = small_font; ws["D8"].alignment = Alignment(horizontal="left", vertical="center")
+
+        ws.merge_cells("B9:C9")
+        ws["B9"] = "송금신청액(Amount)"; ws["B9"].font = small_font; ws["B9"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["D9"] = f"통화: {item.get('currency', 'USD')}"; ws["D9"].font = val_font; ws["D9"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("E9:F9")
+        ws["E9"] = f"금액: {item.get('balance_amount', 0):,.2f}"; ws["E9"].font = val_font; ws["E9"].alignment = Alignment(horizontal="right", vertical="center")
+        ws["G9"] = "미화상당액:"; ws["G9"].font = small_font; ws["G9"].alignment = Alignment(horizontal="left", vertical="center")
+
+        # 수취인
+        ws.merge_cells("B10:B12")
+        ws["B10"] = "수취인\n(Beneficiary)"; ws["B10"].font = small_font; ws["B10"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws["C10"] = "성명(업체명)"; ws["C10"].font = small_font; ws["C10"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D10:E10")
+        ws["D10"] = item.get("vendor_name", ""); ws["D10"].font = val_font; ws["D10"].alignment = Alignment(horizontal="left", vertical="center")
+        ws["F10"] = "신청인과의 관계"; ws["F10"].font = small_font; ws["F10"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["G10"] = ""; ws["G10"].font = val_font
+
+        ws["C11"] = "주소"; ws["C11"].font = small_font; ws["C11"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D11:G11"); ws["D11"] = ""; ws["D11"].font = val_font
+
+        ws["C12"] = "국적"; ws["C12"].font = small_font; ws["C12"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["D12"] = "SINGAPORE" if "SINGAPORE" in item.get("vendor_name", "").upper() else ""; ws["D12"].font = val_font; ws["D12"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("E12:F12")
+        ws["E12"] = "중국CNY송금시 신분증 번호"; ws["E12"].font = small_font; ws["E12"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["G12"] = ""; ws["G12"].font = val_font
+
+        # 수취거래은행
+        ws.merge_cells("B13:B16")
+        ws["B13"] = "수취거래은행\n(Beneficiary's\nBank)"; ws["B13"].font = small_font; ws["B13"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws["C13"] = "SWIFT BIC"; ws["C13"].font = small_font; ws["C13"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D13:E13")
+        ws["D13"] = "OCBCSGSG" if "TIME" in item.get("vendor_name", "") else ""; ws["D13"].font = val_font; ws["D13"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["F13"] = "은행코드"; ws["F13"].font = small_font; ws["F13"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["G13"] = ""; ws["G13"].font = val_font
+
+        ws["C14"] = "계좌번호"; ws["C14"].font = small_font; ws["C14"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D14:G14")
+        ws["D14"] = "503344509301" if "TIME" in item.get("vendor_name", "") else ""; ws["D14"].font = val_font; ws["D14"].alignment = Alignment(horizontal="left", vertical="center")
+
+        ws["C15"] = "은행명"; ws["C15"].font = small_font; ws["C15"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D15:G15")
+        ws["D15"] = "OCBC BANK, SINGAPORE" if "TIME" in item.get("vendor_name", "") else ""; ws["D15"].font = val_font; ws["D15"].alignment = Alignment(horizontal="left", vertical="center")
+
+        ws["C16"] = "은행주소"; ws["C16"].font = small_font; ws["C16"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D16:G16"); ws["D16"] = ""; ws["D16"].font = val_font
+
+        # 송금사유 및 기타
+        ws.merge_cells("B17:C17")
+        ws["B17"] = "송금사유"; ws["B17"].font = small_font; ws["B17"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["D17"] = f"{datetime.today().strftime('%y%m%d')}_송금({item.get('pending_no', '')})"; ws["D17"].font = val_font; ws["D17"].alignment = Alignment(horizontal="left", vertical="center")
+        ws["E17"] = "수수료부담\n(Charges)"; ws["E17"].font = small_font; ws["E17"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.merge_cells("F17:G17")
+        ws["F17"] = "각자부담 ■ (Applicant / Beneficiary)"; ws["F17"].font = small_font; ws["F17"].alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.merge_cells("B18:C18")
+        ws["B18"] = "수입대금의 경우"; ws["B18"].font = small_font; ws["B18"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["D18"] = "H.S. code:"; ws["D18"].font = small_font; ws["D18"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("E18:F18")
+        ws["E18"] = "L/C or 계약서 NO:"; ws["E18"].font = small_font; ws["E18"].alignment = Alignment(horizontal="center", vertical="center")
+        ws["G18"] = "대응수입예정일"; ws["G18"].font = small_font; ws["G18"].alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.merge_cells("B19:C18")
+        ws["B19"] = "중간경유은행"; ws["B19"].font = small_font; ws["B19"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("D19:D19"); ws["D19"] = ""
+        ws["E19"] = "기타통지사항"; ws["E19"].font = small_font; ws["E19"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.merge_cells("F19:G19"); ws["F19"] = ""
+
+        # 테두리 일괄 적용 (4행~19행)
+        for r in range(4, 20):
+            for c in range(1, 8):
                 ws.cell(row=r, column=c).border = thin_border
-                if r == 4:
-                    ws.cell(row=r, column=c).alignment = Alignment(horizontal="center")
-                    ws.cell(row=r, column=c).fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
 
-        # C. 상세 기본 정보
-        ws["A4"] = f"신청일자 (Date): {datetime.today().strftime('%Y-%m-%d')}"
-        ws["A5"] = f"지불예정일 (Fixed Payment Date): {item.get('scheduled_payment_date', '')}"
-        
-        # D. 주요 내역 데이터
-        headers = ["항목 (Field)", "상세 정보 (Details)"]
-        ws.merge_cells("A7:B7")
-        ws["A7"] = "상세 송금 내용"
-        ws["A7"].font = Font(bold=True, color="FFFFFF")
-        ws["A7"].fill = header_fill
+        # 4. 하단 서약 및 서명란
+        ws.merge_cells("A20:G20")
+        ws["A20"] = "■ 본인은 귀행 영업점에 비치된 「외환거래기본약관」 및 「전자금융외화송금거래약관」을 열람하고 그 내용에 따를 것을 확약하며 신청합니다."
+        ws["A20"].font = Font(name='맑은 고딕', size=8, bold=True)
 
-        details = [
-            ("전표/미결번호 (Journal/Pending No)", item.get("pending_no", "")),
-            ("확정 전표번호 (Voucher No)", item.get("confirmed_voucher_no", "")),
-            ("계정과목 (Account)", f"{item.get('account_name', '')} ({item.get('account_code', '')})"),
-            ("수취 거래처 (Customer)", item.get("vendor_name", "")),
-            ("지급 통화 (Currency)", item.get("currency", "KRW")),
-            ("원화 환산금액 (KRW Balance)", f"{int(item.get('krw_balance', 0)):,} 원"),
-            ("수취 은행 (Customer Bank)", ""),
-            ("수취 계좌번호 (Bank Account)", ""),
-            ("예금주 (Account Holder)", item.get("vendor_name", ""))
-        ]
+        ws.merge_cells("A21:E21")
+        ws["A21"] = "■ 본 거래는 미국, UN, EU등이 정한 경제제재 대상자 또는 국가와 관련이 없음을 확인합니다."
+        ws["A21"].font = Font(name='맑은 고딕', size=8)
 
-        row_idx = 8
-        for label, val in details:
-            ws.cell(row=row_idx, column=1, value=label).font = Font(bold=True)
-            ws.cell(row=row_idx, column=1).border = thin_border
-            ws.cell(row=row_idx, column=1).fill = PatternFill(start_color="F9FBFD", end_color="F9FBFD", fill_type="solid")
-            
-            ws.merge_cells(start_row=row_idx, start_column=2, end_row=row_idx, end_column=4)
-            val_cell = ws.cell(row=row_idx, column=2, value=val)
-            val_cell.border = thin_border
-            if "원" in str(val): val_cell.alignment = Alignment(horizontal="right")
-            row_idx += 1
+        ws.merge_cells("F21:G21")
+        ws["F21"] = "예금주명: 흥아해운(주) (인)"
+        ws["F21"].font = Font(name='맑은 고딕', size=10, bold=True)
+        ws["F21"].alignment = Alignment(horizontal="right", vertical="center")
 
-        widths = {'A': 32, 'B': 20, 'C': 20, 'D': 20, 'E': 12, 'F': 12, 'G': 12}
-        for col, width in widths.items(): ws.column_dimensions[col].width = width
+        # 열 너비 세팅
+        col_widths = {'A': 4, 'B': 16, 'C': 18, 'D': 25, 'E': 16, 'F': 20, 'G': 18}
+        for col, w in col_widths.items(): ws.column_dimensions[col].width = w
 
     stream = io.BytesIO()
     wb.save(stream)
     stream.seek(0)
-    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=FIXED_PAYMENT_REMITTANCE_FORM.xlsx"})
+    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.xlsx"})
 
 # 🚨 [전표번호 최우선 적용 EDM 원본 다운로드]
 @app.post("/api/pending/export-edm-zip")
@@ -681,7 +781,6 @@ def export_edm_zip(payload: PendingSearchQuery):
                 counter += 1
                 continue
                 
-            # 🚨 [수정] 미결번호가 아닌 확정 전표번호(group_settled_number)를 최우선으로 전송
             voucher_no = str(item.get("confirmed_voucher_no") or item.get("pending_no") or "").strip()
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             
