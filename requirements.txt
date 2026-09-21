@@ -1,8 +1,8 @@
+Plaintext
 fastapi
 uvicorn
 requests
-pandas
 openpyxl
-python-multipart
 pydantic
-python-dotenv
+python-docx
+lxml
