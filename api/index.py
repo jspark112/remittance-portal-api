@@ -12,8 +12,8 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (순정 API 경로 최종 복구 버전)",
-    version="9.0.0"
+    description="SamsApi 실시간 연동 (회사코드 HASL 적용 버전)",
+    version="9.1.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -85,60 +85,57 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         "Content-Type": "application/json"
     }
     
-    # 순정 경로 복구 완료! 가장 먼저 API 매뉴얼 주소를 시도합니다.
-    candidates = [
-        f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list",
-        f"{SAMSAPI_BASE_URL}/sams/api/v1/ntstl/list"
-    ]
+    api_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
 
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
+    
+    # 🚨 [중요 수정] 회사 코드를 "01"에서 "HASL"(흥아해운)로 변경
     req_body = {
-        "company_code": "01", "target_date": target_dt.replace("-", ""),
+        "company_code": "HASL",
+        "target_date": target_dt.replace("-", ""),
         "type_account_code": [payload.account_code] if payload.account_code and payload.account_code not in ["", "string", "ALL"] else [],
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
 
-    last_error_msg = ""
-    for api_url in candidates:
-        try:
-            res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
-            if res.status_code == 404:
-                last_error_msg = f"HTTP 404 (경로 없음) - 주소: {api_url}"
-                continue
-            if res.status_code == 401:
-                return [{"error_msg": f"인증 실패 (HTTP 401) - API Key 권한 만료 또는 IP 차단됨. ({api_url})"}]
-            if res.status_code == 200:
-                json_data = res.json()
-                if json_data.get("success"):
-                    raw_list = json_data.get("data", [])
-                    parsed_items = []
-                    for raw in raw_list:
-                        def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                        occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
-                        def parse_float(val):
-                            try: return float(val) if val else 0.0
-                            except: return 0.0
-                            
-                        krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
-                        balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
-                        if payload.unsettled_only and balance_amount <= 0: continue
-                            
-                        auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
-                        parsed_items.append({
-                            "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                            "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
-                            "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
-                            "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                            "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
-                            "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
-                        })
-                    return parsed_items
-                else: return [{"error_msg": f"API 데이터 실패: {json_data.get('message')} - URL: {api_url}"}]
-            else: return [{"error_msg": f"서버 응답 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
-        except requests.exceptions.Timeout: return [{"error_msg": f"연결 시간 초과 - 방화벽(8400포트) 차단 확인"}]
-        except requests.exceptions.ConnectionError: return [{"error_msg": f"접속 거부 - 도메인 장애 또는 Vercel 차단"}]
-        except Exception as e: return [{"error_msg": f"백엔드 로직 오류: {str(e)}"}]
-    return [{"error_msg": last_error_msg}]
+    try:
+        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
+        if res.status_code == 404:
+            return [{"error_msg": f"HTTP 404 (경로 없음) - 주소: {api_url}"}]
+        if res.status_code == 401:
+            return [{"error_msg": f"인증 실패 (HTTP 401) - API Key 권한 만료 또는 IP 차단됨."}]
+        if res.status_code == 403:
+            return [{"error_msg": f"서버 응답 에러 (HTTP 403) - Vercel 외부 IP 방화벽 차단 또는 계정 권한 부족 (회사코드: HASL)"}]
+        if res.status_code == 200:
+            json_data = res.json()
+            if json_data.get("success"):
+                raw_list = json_data.get("data", [])
+                parsed_items = []
+                for raw in raw_list:
+                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
+                    occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
+                    def parse_float(val):
+                        try: return float(val) if val else 0.0
+                        except: return 0.0
+                        
+                    krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
+                    balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
+                    if payload.unsettled_only and balance_amount <= 0: continue
+                        
+                    auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
+                    parsed_items.append({
+                        "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                        "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
+                        "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
+                        "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
+                        "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                        "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
+                    })
+                return parsed_items
+            else: return [{"error_msg": f"API 데이터 실패: {json_data.get('message')} - URL: {api_url}"}]
+        else: return [{"error_msg": f"서버 응답 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
+    except requests.exceptions.Timeout: return [{"error_msg": f"연결 시간 초과 - 방화벽(8400포트) 차단 확인"}]
+    except requests.exceptions.ConnectionError: return [{"error_msg": f"접속 거부 - 도메인 장애 또는 Vercel 차단"}]
+    except Exception as e: return [{"error_msg": f"백엔드 로직 오류: {str(e)}"}]
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -171,7 +168,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">순정 API 연동 완료 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">회사코드 HASL 적용 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -184,7 +181,7 @@ def render_portal_ui():
         </div>
 
         <div class="card p-3 mb-4">
-            <h5 class="fw-bold text-secondary mb-3">🔍 미결 조회 조건</h5>
+            <h5 class="fw-bold text-secondary mb-3">🔍 미결 조회 조건 (회사코드: HASL)</h5>
             <div class="row g-3">
                 <div class="col-md-2">
                     <label class="form-label text-secondary fw-bold">발생 시작일</label>
