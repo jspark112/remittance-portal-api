@@ -12,8 +12,8 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (계정과목 차입금 통합 선택 지원)",
-    version="12.1.0"
+    description="SamsApi 실시간 연동 (SyntaxError 보완 및 계정과목 차입금 통합 선택 지원)",
+    version="12.2.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -215,9 +215,7 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
 def fetch_combined_dataset(payload: PendingSearchQuery) -> List[dict]:
     selected = [a.strip() for a in payload.account_codes] if payload.account_codes else []
     
-    # 아무것도 안 골랐거나, "차입금"을 포함한 경우 차입금 가져오기
     has_loan = ("차입금" in selected) or ("LOAN" in selected) or (len(selected) == 0)
-    # 아무것도 안 골랐거나, "차입금" 외의 미결 계정이 포함된 경우 미결자료 가져오기
     has_pending = any(a in selected for a in ["2001", "2002", "미지급금"]) or (len(selected) == 0) or (has_loan and len(selected) > 1)
 
     if payload.use_mock:
@@ -343,7 +341,6 @@ def render_portal_ui():
                             <input class="form-check-input acc-chk" type="checkbox" value="미지급금" id="accUnpaid">
                             <label class="form-check-label fw-bold" for="accUnpaid">미지급금</label>
                         </div>
-                        <!-- 🚨 [추가] 차입금 계정과목 선택 스위치 -->
                         <div class="form-check form-switch">
                             <input class="form-check-input acc-chk" type="checkbox" value="차입금" id="accLoan">
                             <label class="form-check-label fw-bold text-primary" for="accLoan">🏦 차입금</label>
@@ -435,7 +432,7 @@ def render_portal_ui():
             }}
 
             function buildSearchPayload(useMock = false) {{
-                const savedDatesObj = JSON.parse(localStorage.getItem('manualPaymentDates') || '{}');
+                const savedDatesObj = JSON.parse(localStorage.getItem('manualPaymentDates') || '{{}}');
                 const selectedAccs = [];
                 document.querySelectorAll('.acc-chk:checked').forEach(chk => selectedAccs.push(chk.value));
 
@@ -517,7 +514,7 @@ def render_portal_ui():
             
             async function saveDate(pendingNo) {{
                 const newDate = document.getElementById(`date-${{pendingNo}}`).value;
-                const savedObj = JSON.parse(localStorage.getItem('manualPaymentDates') || '{}');
+                const savedObj = JSON.parse(localStorage.getItem('manualPaymentDates') || '{{}}');
                 savedObj[pendingNo] = newDate;
                 localStorage.setItem('manualPaymentDates', JSON.stringify(savedObj));
 
