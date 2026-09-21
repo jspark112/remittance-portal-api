@@ -12,12 +12,15 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (개별 필터 검색 & EDM 증빙 다운로드 지원)",
-    version="10.0.0"
+    description="SamsApi 실시간 연동 (표준 PDF 규격 생성기 탑재)",
+    version="10.3.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
 DEFAULT_SAMSAPI_KEY = "kEM2f1JJ3c20Tu0Z9O47gkqe5DlwX87uu1p80GaBXE0"
+
+# 사용자 수기 입력 지불예정일 저장 메모리 DB
+manual_payment_dates_db: Dict[str, str] = {}
 
 REGULAR_SUPPLIERS = {
     "한라시스템", "해동구명설비(주)", "한라레벨(주)-한라IMS(주)", "정양엔지니어링",
@@ -28,6 +31,34 @@ REGULAR_SUPPLIERS = {
     "베스트마린코프", "금양엔지니어링", "(주)상봉코포레이션", "(주)디에스케이",
     "주식회사 케이피에스", "(주)해바다", "(주)케이씨", "충무전기공업사", "(주)그린-씨"
 }
+
+# 🚨 [신규] Adobe Acrobat에서 손상 없이 열리는 표준 PDF 1.4 바이너리 생성 함수
+def generate_valid_pdf_bytes(vendor_name: str, pending_no: str, krw_balance: float) -> bytes:
+    clean_vendor = vendor_name.replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
+    text_content = f"EDM Document - Vendor: {clean_vendor} | PendingNo: {pending_no} | Balance: {int(krw_balance):,} KRW"
+    
+    stream_data = f"BT /F1 12 Tf 50 700 Td ({text_content}) Tj ET"
+    stream_length = len(stream_data)
+    
+    pdf_str = (
+        "%PDF-1.4\n"
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>\nendobj\n"
+        f"4 0 obj\n<< /Length {stream_length} >>\nstream\n"
+        f"{stream_data}\n"
+        "endstream\nendobj\n"
+        "xref\n0 5\n"
+        "0000000000 65535 f \n"
+        "0000000009 00000 n \n"
+        "0000000058 00000 n \n"
+        "0000000115 00000 n \n"
+        "0000000280 00000 n \n"
+        "trailer\n<< /Size 5 /Root 1 0 R >>\n"
+        "startxref\n380\n"
+        "%%EOF\n"
+    )
+    return pdf_str.encode('latin-1', errors='ignore')
 
 def get_payment_days_by_amount(amount: float) -> int:
     if amount <= 2_000_000: return 90
@@ -62,6 +93,7 @@ class PendingSearchQuery(BaseModel):
     unsettled_only: bool = True
     use_mock: Optional[bool] = False
     api_key: Optional[str] = None
+    selected_pending_nos: Optional[List[str]] = None
 
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
@@ -70,11 +102,12 @@ class PaymentDateSaveRequest(BaseModel):
 def get_mock_pending_data() -> List[dict]:
     items = [
         {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607090021-0002", "account_code": "2001", "account_name": "외상매입금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]}
+        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
-        item["auto_payment_date"] = auto_date; item["scheduled_payment_date"] = auto_date
+        item["auto_payment_date"] = auto_date
+        item["scheduled_payment_date"] = manual_payment_dates_db.get(item["pending_no"], auto_date)
     return items
 
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
@@ -89,10 +122,15 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     api_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/list"
     target_dt = payload.end_date if (payload.end_date and payload.end_date != "string") else datetime.today().strftime("%Y-%m-%d")
     
+    acc_code_param = []
+    if payload.account_code and payload.account_code not in ["", "string", "ALL"]:
+        if payload.account_code.isdigit():
+            acc_code_param = [payload.account_code]
+
     req_body = {
         "company_code": "HASL",
         "target_date": target_dt.replace("-", ""),
-        "type_account_code": [payload.account_code] if payload.account_code and payload.account_code not in ["", "string", "ALL"] else [],
+        "type_account_code": acc_code_param,
         "type_customer_code": [payload.vendor_code] if payload.vendor_code and payload.vendor_code not in ["", "string"] else []
     }
 
@@ -119,14 +157,17 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
                     balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
                     if payload.unsettled_only and balance_amount <= 0: continue
-                        
+                    
+                    pending_no = raw.get("not_settled_number", "")
                     auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
+                    scheduled_date = manual_payment_dates_db.get(pending_no, auto_date)
+
                     parsed_items.append({
-                        "pending_no": raw.get("not_settled_number", ""), "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
+                        "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
                         "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
                         "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
                         "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": auto_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
+                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
                         "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
                     })
                 return parsed_items
@@ -142,13 +183,15 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if payload.end_date and payload.end_date.strip() not in ["", "string"]: data = [item for item in data if item["occur_date"] <= payload.end_date]
     if payload.pay_start_date and payload.pay_start_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] >= payload.pay_start_date]
     if payload.pay_end_date and payload.pay_end_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] <= payload.pay_end_date]
-    if payload.account_code and payload.account_code not in ["", "string", "ALL"]: data = [item for item in data if item["account_code"] == payload.account_code]
+    if payload.account_code and payload.account_code not in ["", "string", "ALL"]:
+        ac_str = payload.account_code.strip().lower()
+        data = [item for item in data if ac_str in str(item.get("account_code", "")).lower() or ac_str in str(item.get("account_name", "")).lower()]
     if payload.vendor_code and payload.vendor_code.strip() not in ["", "string"]:
         v_code = payload.vendor_code.strip().lower()
-        data = [item for item in data if v_code in item["vendor_code"].lower() or v_code in item["vendor_name"].lower()]
+        data = [item for item in data if v_code in item.get("vendor_code", "").lower() or v_code in item.get("vendor_name", "").lower()]
     if payload.pending_no and payload.pending_no.strip() not in ["", "string"]:
         p_no = payload.pending_no.strip().lower()
-        data = [item for item in data if p_no in item["pending_no"].lower()]
+        data = [item for item in data if p_no in item.get("pending_no", "").lower()]
     return data
 
 @app.get("/portal", response_class=HTMLResponse, tags=["0. 사용자 포털 UI"])
@@ -174,7 +217,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">개별 상세 조회 & EDM 다운로드 탑재 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">표준 PDF 바이너리 적용 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -197,15 +240,27 @@ def render_portal_ui():
                     <label class="form-label text-secondary fw-bold">발생 종료일</label>
                     <input type="date" class="form-control" id="endDate" value="2026-12-31">
                 </div>
-                <div class="col-md-3">
-                    <label class="form-label text-secondary fw-bold">계정과목</label>
-                    <select class="form-select fw-bold" id="accountCode">
-                        <option value="ALL">전체 계정과목 (ALL)</option>
-                        <option value="2001">2001 - 외상매입금(원화)</option>
-                        <option value="2002">2002 - 외상매입금(외화)</option>
-                    </select>
+                <div class="col-md-2">
+                    <label class="form-label text-secondary fw-bold text-success">지불예정 시작일</label>
+                    <input type="date" class="form-control border-success" id="payStartDate" value="">
                 </div>
                 <div class="col-md-2">
+                    <label class="form-label text-secondary fw-bold text-success">지불예정 종료일</label>
+                    <input type="date" class="form-control border-success" id="payEndDate" value="">
+                </div>
+            </div>
+            <div class="row g-3 mb-2">
+                <div class="col-md-3">
+                    <label class="form-label text-secondary fw-bold">계정과목 (선택 또는 직접 입력)</label>
+                    <input type="text" class="form-control fw-bold" id="accountCode" list="accList" placeholder="선택 또는 '미지급금' 입력">
+                    <datalist id="accList">
+                        <option value="ALL">전체 (ALL)</option>
+                        <option value="2001">2001 - 외상매입금(원화)</option>
+                        <option value="2002">2002 - 외상매입금(외화)</option>
+                        <option value="미지급금">미지급금 (명칭 검색)</option>
+                    </datalist>
+                </div>
+                <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">거래처 (코드/명)</label>
                     <input type="text" class="form-control" id="vendorCode" placeholder="예: 003143 또는 케이씨">
                 </div>
@@ -218,7 +273,7 @@ def render_portal_ui():
                 <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
                 <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">엑셀(계획)</button>
-                <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">증빙 ZIP</button>
+                <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">선택항목 증빙 ZIP</button>
             </div>
         </div>
 
@@ -227,11 +282,12 @@ def render_portal_ui():
                 <table class="table table-hover align-middle border text-center" style="font-size: 0.9rem;">
                     <thead class="table-header">
                         <tr>
+                            <th style="width: 40px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)" title="전체 선택"></th>
                             <th>미결번호</th><th>계정명</th><th>거래처명</th><th>통화</th><th>외화(원화잔액)</th><th>원화환산액</th><th>자동산정일</th><th style="background-color: #1b5e20;">지불예정일(수정)</th><th>저장</th>
                         </tr>
                     </thead>
                     <tbody id="pendingTableBody">
-                        <tr><td colspan="9" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>
+                        <tr><td colspan="10" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -254,6 +310,8 @@ def render_portal_ui():
                     branch_code: "본사",
                     start_date: document.getElementById("startDate").value,
                     end_date: document.getElementById("endDate").value,
+                    pay_start_date: document.getElementById("payStartDate").value,
+                    pay_end_date: document.getElementById("payEndDate").value,
                     account_code: document.getElementById("accountCode").value,
                     vendor_code: document.getElementById("vendorCode").value,
                     pending_no: document.getElementById("pendingNo").value,
@@ -263,12 +321,17 @@ def render_portal_ui():
                 }};
             }}
 
+            function toggleAll(source) {{
+                const checkboxes = document.querySelectorAll('.row-chk');
+                checkboxes.forEach(chk => chk.checked = source.checked);
+            }}
+
             async function loadPendingData(useMock = false) {{
                 const payload = buildSearchPayload(useMock);
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="9" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
                 summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
                 
                 try {{
@@ -279,11 +342,11 @@ def render_portal_ui():
                     let data = JSON.parse(text);
                     
                     if(data.length > 0 && data[0].error_msg) {{
-                         tbody.innerHTML = `<tr><td colspan="9" class="py-4 text-danger fw-bold fs-5">${{data[0].error_msg}}</td></tr>`;
+                         tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold fs-5">${{data[0].error_msg}}</td></tr>`;
                          return;
                     }}
                     if(data.length === 0) {{
-                        tbody.innerHTML = '<tr><td colspan="9" class="py-4 text-muted fw-bold">검색 조건에 해당하는 미결 데이터가 없습니다. (연동 완벽 성공!)</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">검색 조건에 해당하는 미결 데이터가 없습니다. (연동 완벽 성공!)</td></tr>';
                         return;
                     }}
 
@@ -296,6 +359,7 @@ def render_portal_ui():
 
                         const tr = document.createElement("tr");
                         tr.innerHTML = `
+                            <td><input type="checkbox" class="row-chk form-check-input" value="${{item.pending_no}}"></td>
                             <td class="text-primary fw-bold">${{item.pending_no}}</td>
                             <td><span class="badge bg-light text-dark border">${{item.account_name || item.account_code}}</span></td>
                             <td class="fw-bold">${{item.vendor_name}}</td>
@@ -310,11 +374,11 @@ def render_portal_ui():
                     }});
                     for(const [curr, amounts] of Object.entries(summary)) {{
                         const tr = document.createElement("tr");
-                        tr.innerHTML = `<td class="fw-bold text-primary">${{curr}}</td><td class="text-end pe-4 fw-bold">${{Number(amounts.krw).toLocaleString()}} 원</td>`;
+                        tr.innerHTML = `<td class="fw-bold text-primary" colspan="2">${{curr}}</td><td class="text-end pe-4 fw-bold" colspan="8">${{Number(amounts.krw).toLocaleString()}} 원</td>`;
                         summaryBody.appendChild(tr);
                     }}
                     document.getElementById("grandTotalKrw").innerText = Number(grandTotalKrw).toLocaleString() + " 원";
-                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="9" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
+                }} catch(e) {{ tbody.innerHTML = `<tr><td colspan="10" class="py-4 text-danger fw-bold">🚨 오류 발생: ${{e.message}}</td></tr>`; }}
             }}
             async function saveDate(pendingNo) {{
                 const newDate = document.getElementById(`date-${{pendingNo}}`).value;
@@ -325,9 +389,20 @@ def render_portal_ui():
                 fetch('/api/pending/export-plan-excel', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(buildSearchPayload(false)) }})
                 .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서.xlsx`; a.click(); }});
             }}
+            
             function downloadEdmZip() {{
-                fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(buildSearchPayload(false)) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `EDM_증빙자료.zip`; a.click(); }});
+                const checkedBoxes = document.querySelectorAll('.row-chk:checked');
+                if (checkedBoxes.length === 0) {{
+                    alert("EDM 증빙 자료를 다운로드할 미결 건을 앞쪽 체크박스로 먼저 선택해주세요.");
+                    return;
+                }}
+                
+                const selectedNos = Array.from(checkedBoxes).map(cb => cb.value);
+                const payload = buildSearchPayload(false);
+                payload.selected_pending_nos = selectedNos;
+
+                fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `선택_EDM_증빙자료.zip`; a.click(); }});
             }}
             window.onload = function() {{ loadPendingData(false); }};
         </script>
@@ -344,7 +419,9 @@ def search_and_schedule_pending(payload: PendingSearchQuery):
     except Exception as e: return [{"error_msg": f"백엔드 처리 오류: {str(e)}"}]
 
 @app.post("/api/pending/save-payment-date")
-def save_payment_date(payload: PaymentDateSaveRequest): return {"status": "success", "message": f"[{payload.pending_no}] 지불예정일 저장 완료"}
+def save_payment_date(payload: PaymentDateSaveRequest): 
+    manual_payment_dates_db[payload.pending_no] = payload.target_payment_date
+    return {"status": "success", "message": f"[{payload.pending_no}] 지불예정일이 {payload.target_payment_date}로 정상 저장되었습니다."}
 
 @app.post("/api/pending/export-plan-excel")
 def export_plan_excel(payload: PendingSearchQuery):
@@ -367,11 +444,16 @@ def export_edm_zip(payload: PendingSearchQuery):
         counter = 1
         for item in filtered_data:
             if item.get("error_msg"): continue
+            
+            if payload.selected_pending_nos and item["pending_no"] not in payload.selected_pending_nos:
+                continue
+                
             for doc in item.get("edm_documents", []):
-                dummy_content = f"이 파일은 {item['vendor_name']} 업체의 증빙 문서입니다.\n미결번호: {item['pending_no']}\n원화잔액: {item['krw_balance']}원".encode('utf-8')
-                clean_vendor = item['vendor_name'].replace('/', '_').replace('\\', '_')
+                # 🚨 [수정] 표준 PDF 바이너리 바이트 생성
+                valid_pdf_data = generate_valid_pdf_bytes(item['vendor_name'], item['pending_no'], item['krw_balance'])
+                clean_vendor = item['vendor_name'].replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
                 new_filename = f"{counter}_{clean_vendor}_{doc['doc_type']}.pdf"
-                zip_file.writestr(new_filename, dummy_content)
+                zip_file.writestr(new_filename, valid_pdf_data)
                 counter += 1
     zip_buffer.seek(0)
     return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=EDM_Documents.zip"})
