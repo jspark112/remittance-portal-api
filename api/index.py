@@ -13,8 +13,8 @@ from openpyxl.styles import Font, Alignment, PatternFill, borders
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (결재용 송금신청서 엑셀 다운로드 탑재)",
-    version="14.0.0"
+    description="SamsApi 실시간 연동 (전표번호 기반 EDM 연동 및 FIXED PAYMENT LIST 송금신청서 탑재)",
+    version="15.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -258,7 +258,7 @@ def render_portal_ui():
             .resizer {{ width: 6px; height: 100%; position: absolute; right: 0; top: 0; cursor: col-resize; z-index: 1; }}
             .resizer:hover, .resizer.resizing {{ background-color: #ffc107; border-right: 2px solid #e0a800; }}
             .btn-excel {{ background-color: #1d6f42; color: white; }}
-            .btn-remit {{ background-color: #e67e22; color: white; }} /* 송금신청서 전용 주황색 버튼 */
+            .btn-remit {{ background-color: #e67e22; color: white; }}
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
             .bg-summary {{ background-color: #fffbeb; }}
@@ -268,7 +268,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">결재용 송금신청서 탑재 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">FIXED PAYMENT LIST 송금신청서 양식 탑재 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -338,8 +338,7 @@ def render_portal_ui():
                 <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
                 <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">리스트(엑셀)</button>
-                <!-- 🚨 [추가] 송금신청서 엑셀 다운로드 버튼 -->
-                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">선택건 송금신청서(엑셀)</button>
+                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">FIXED PAYMENT 송금신청서(엑셀)</button>
                 <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">선택항목 증빙 ZIP</button>
             </div>
         </div>
@@ -505,16 +504,15 @@ def render_portal_ui():
                 .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `전체_지불_계획리스트.xlsx`; a.click(); }});
             }}
 
-            // 🚨 [추가] 송금신청서 다운로드 JS 로직
             function downloadRemittanceForm() {{
                 const checkedBoxes = document.querySelectorAll('.row-chk:checked');
-                if (checkedBoxes.length === 0) {{ alert("송금신청서를 작성할 건을 체크박스로 먼저 선택해주세요."); return; }}
+                if (checkedBoxes.length === 0) {{ alert("송금신청서를 출력할 건을 선택해주세요."); return; }}
                 
                 const payload = buildSearchPayload(false);
                 payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
 
                 fetch('/api/pending/export-remittance-form', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `송금신청서(기안용).xlsx`; a.click(); }});
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `FIXED_PAYMENT_LIST_송금신청서.xlsx`; a.click(); }});
             }}
             
             function downloadEdmZip() {{
@@ -525,12 +523,12 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "원본 다운로드 중...";
+                btn.innerText = "전표 증빙 원본 다운로드 중...";
                 btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
-                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_EDM_원본증빙.zip`; a.click(); 
+                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_전표_EDM증빙자료.zip`; a.click(); 
                     btn.innerText = originalText; btn.disabled = false;
                 }}).catch(() => {{ 
                     alert("다운로드 중 오류가 발생했습니다."); 
@@ -574,106 +572,93 @@ def export_plan_excel(payload: PendingSearchQuery):
     stream = io.BytesIO(); wb.save(stream); stream.seek(0)
     return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=List.xlsx"})
 
-# 🚨 [신규 추가] 송금신청서 엑셀 다운로드 API
+# 🚨 [SAMS ERP FIXED PAYMENT LIST 건별 송금신청서 양식 다운로드]
 @app.post("/api/pending/export-remittance-form")
-def export_remittance_form(payload: PendingSearchQuery):
+def export_remittance-form(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
     
-    # 체크박스로 선택한 건만 필터링
     if payload.selected_pending_nos:
         filtered_data = [item for item in filtered_data if item["pending_no"] in payload.selected_pending_nos]
 
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "송금신청서"
+    wb.remove(wb.active) # 기본 시트 제거
 
-    # 스타일 세팅
-    title_font = Font(size=18, bold=True)
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    center_align = Alignment(horizontal="center", vertical="center")
-    right_align = Alignment(horizontal="right", vertical="center")
     thin_border = borders.Border(
         left=borders.Side(style='thin'), right=borders.Side(style='thin'),
         top=borders.Side(style='thin'), bottom=borders.Side(style='thin')
     )
+    header_fill = PatternFill(start_color="2B4C7E", end_color="2B4C7E", fill_type="solid")
 
-    # 1. 엑셀 상단 제목 (병합)
-    ws.merge_cells("A1:I2")
-    title_cell = ws["A1"]
-    title_cell.value = "송 금 신 청 서 (지 급 품 의)"
-    title_cell.font = title_font
-    title_cell.alignment = center_align
+    for idx, item in enumerate(filtered_data, 1):
+        clean_name = item.get("vendor_name", f"건별_{idx}").replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')[:20]
+        ws = wb.create_sheet(title=f"{idx}_{clean_name}")
 
-    # 2. 작성일자
-    ws["A4"] = f"작성일자 : {datetime.today().strftime('%Y-%m-%d')}"
-    ws["A4"].font = Font(bold=True)
+        # A. 타이틀
+        ws.merge_cells("A1:G2")
+        ws["A1"] = "FIXED PAYMENT REMITTANCE APPLICATION (송금신청서)"
+        ws["A1"].font = Font(size=16, bold=True)
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # 3. 테이블 헤더
-    headers = ["순번", "지불예정일", "수취인(거래처명)", "통화", "청구금액", "원화금액(KRW)", "은행명(수기)", "계좌번호(수기)", "적요(미결번호)"]
-    ws.append([]) # 5행 공란
-    ws.append(headers) # 6행 헤더
-    for col_idx, cell in enumerate(ws[6], 1):
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = center_align
-        cell.border = thin_border
-
-    # 4. 데이터 삽입
-    total_krw = 0
-    for i, row in enumerate(filtered_data, 1):
-        if row.get("error_msg"): continue
+        # B. 결재란
+        ws.merge_cells("E3:G3")
+        ws["E3"] = "결 재 (APPROVAL)"
+        ws["E3"].font = Font(bold=True)
+        ws["E3"].alignment = Alignment(horizontal="center")
         
-        krw_bal = row.get("krw_balance", 0)
-        total_krw += krw_bal
+        ws["E4"] = "담당"; ws["F4"] = "검토"; ws["G4"] = "승인"
+        ws["E5"] = ""; ws["F5"] = ""; ws["G5"] = ""
         
-        data_row = [
-            i,
-            row.get("scheduled_payment_date", ""),
-            row.get("vendor_name", ""),
-            row.get("currency", ""),
-            row.get("balance_amount", 0),
-            krw_bal,
-            "", # 은행명 (엑셀에서 수기 입력하도록 공란 처리)
-            "", # 계좌번호 (엑셀에서 수기 입력하도록 공란 처리)
-            row.get("pending_no", "")
+        for r in range(3, 6):
+            for c in range(5, 8):
+                ws.cell(row=r, column=c).border = thin_border
+                if r == 4:
+                    ws.cell(row=r, column=c).alignment = Alignment(horizontal="center")
+                    ws.cell(row=r, column=c).fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+
+        # C. 상세 기본 정보
+        ws["A4"] = f"신청일자 (Date): {datetime.today().strftime('%Y-%m-%d')}"
+        ws["A5"] = f"지불예정일 (Fixed Payment Date): {item.get('scheduled_payment_date', '')}"
+        
+        # D. 주요 내역 데이터
+        headers = ["항목 (Field)", "상세 정보 (Details)"]
+        ws.merge_cells("A7:B7")
+        ws["A7"] = "상세 송금 내용"
+        ws["A7"].font = Font(bold=True, color="FFFFFF")
+        ws["A7"].fill = header_fill
+
+        details = [
+            ("전표/미결번호 (Journal/Pending No)", item.get("pending_no", "")),
+            ("확정 전표번호 (Voucher No)", item.get("confirmed_voucher_no", "")),
+            ("계정과목 (Account)", f"{item.get('account_name', '')} ({item.get('account_code', '')})"),
+            ("수취 거래처 (Customer)", item.get("vendor_name", "")),
+            ("지급 통화 (Currency)", item.get("currency", "KRW")),
+            ("원화 환산금액 (KRW Balance)", f"{int(item.get('krw_balance', 0)):,} 원"),
+            ("수취 은행 (Customer Bank)", ""),
+            ("수취 계좌번호 (Bank Account)", ""),
+            ("예금주 (Account Holder)", item.get("vendor_name", ""))
         ]
-        ws.append(data_row)
-        
-        for cell in ws[ws.max_row]:
-            cell.border = thin_border
-            if cell.column in [1, 2, 4, 7, 8, 9]: cell.alignment = center_align # 텍스트 중앙정렬
-            elif cell.column in [5, 6]: # 금액 우측정렬 및 콤마
-                cell.number_format = '#,##0'
-                cell.alignment = right_align
 
-    # 5. 합계 행
-    ws.append(["합계", "", "", "", "", total_krw, "", "", ""])
-    total_row = ws.max_row
-    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=5)
-    
-    sum_cell = ws.cell(row=total_row, column=1)
-    sum_cell.value = "합 계 (Total)"
-    sum_cell.alignment = center_align
-    sum_cell.font = Font(bold=True)
-    
-    for cell in ws[total_row]:
-        cell.border = thin_border
-        cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-        if cell.column == 6:
-            cell.number_format = '#,##0'
-            cell.font = Font(bold=True, color="FF0000") # 합계는 빨간색 볼드체
+        row_idx = 8
+        for label, val in details:
+            ws.cell(row=row_idx, column=1, value=label).font = Font(bold=True)
+            ws.cell(row=row_idx, column=1).border = thin_border
+            ws.cell(row=row_idx, column=1).fill = PatternFill(start_color="F9FBFD", end_color="F9FBFD", fill_type="solid")
+            
+            ws.merge_cells(start_row=row_idx, start_column=2, end_row=row_idx, end_column=4)
+            val_cell = ws.cell(row=row_idx, column=2, value=val)
+            val_cell.border = thin_border
+            if "원" in str(val): val_cell.alignment = Alignment(horizontal="right")
+            row_idx += 1
 
-    # 6. 컬럼 너비 조정
-    widths = {'A': 6, 'B': 14, 'C': 30, 'D': 8, 'E': 15, 'F': 18, 'G': 15, 'H': 25, 'I': 25}
-    for col, width in widths.items():
-        ws.column_dimensions[col].width = width
+        widths = {'A': 32, 'B': 20, 'C': 20, 'D': 20, 'E': 12, 'F': 12, 'G': 12}
+        for col, width in widths.items(): ws.column_dimensions[col].width = width
 
     stream = io.BytesIO()
     wb.save(stream)
     stream.seek(0)
-    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Remittance_Form.xlsx"})
+    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=FIXED_PAYMENT_REMITTANCE_FORM.xlsx"})
 
+# 🚨 [전표번호 최우선 적용 EDM 원본 다운로드]
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -696,24 +681,18 @@ def export_edm_zip(payload: PendingSearchQuery):
                 counter += 1
                 continue
                 
-            journal_number = item.get("pending_no", "")
-            confirmed_voucher = item.get("confirmed_voucher_no", "")
+            # 🚨 [수정] 미결번호가 아닌 확정 전표번호(group_settled_number)를 최우선으로 전송
+            voucher_no = str(item.get("confirmed_voucher_no") or item.get("pending_no") or "").strip()
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             
-            req_body = {"company_code": "HASL", "journal_number": journal_number, "language_gubun": "KO"}
+            req_body = {"company_code": "HASL", "journal_number": voucher_no, "language_gubun": "KO"}
             
             try:
                 res = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
                 edm_list = res.json().get("data", []) if res.status_code == 200 and res.json().get("success") else []
-                
-                if not edm_list and confirmed_voucher and confirmed_voucher != journal_number:
-                    req_body["journal_number"] = confirmed_voucher
-                    res2 = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
-                    if res2.status_code == 200 and res2.json().get("success"):
-                        edm_list = res2.json().get("data", [])
 
                 if not edm_list:
-                    zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"SAMSAPI 서버에 {item['pending_no']} 에 대한 증빙 파일이 없습니다.".encode('utf-8'))
+                    zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"SAMSAPI 서버(전표번호: {voucher_no})에 증빙 파일이 없습니다.".encode('utf-8'))
                 else:
                     for edm in edm_list:
                         real_filename = edm.get("filename", f"document_{counter}.pdf")
