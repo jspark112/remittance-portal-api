@@ -12,8 +12,8 @@ from openpyxl.styles import Font, Alignment, PatternFill
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (미결자료 + 차입금명세서 통합 연동 버전)",
-    version="12.0.0"
+    description="SamsApi 실시간 연동 (계정과목 차입금 통합 선택 지원)",
+    version="12.1.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -77,7 +77,6 @@ def calculate_payment_date(occur_date_str: str, request_date_str: str, vendor_na
     return (base_target_dt + timedelta(days=days_to_add_map[weekday])).strftime("%Y-%m-%d")
 
 class PendingSearchQuery(BaseModel):
-    data_type: str = Field(default="NTSTL") # 🚨 NTSTL(미결) vs LOAN(차입금) 구분
     branch_code: str = Field(default="본사")
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -97,22 +96,17 @@ class PaymentDateSaveRequest(BaseModel):
     target_payment_date: str
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
-    if payload.data_type == "LOAN":
-        items = [
-            {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "confirmed_voucher_no": "LN-001", "edm_documents": [{"doc_id": "EDM-L1", "doc_type": "차입약정서", "file_name": "KB_Loan.pdf", "download_url": "#"}]}
-        ]
-    else:
-        items = [
-            {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
-            {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]}
-        ]
+    items = [
+        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
+        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]},
+        {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "confirmed_voucher_no": "LN-001", "edm_documents": [{"doc_id": "EDM-L1", "doc_type": "차입약정서", "file_name": "KB_Loan.pdf", "download_url": "#"}]}
+    ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
         item["auto_payment_date"] = auto_date
-        item["scheduled_payment_date"] = payload.saved_dates.get(item["pending_no"]) or manual_payment_dates_db.get(item["pending_no"], auto_date)
+        item["scheduled_payment_date"] = payload.saved_dates.get(item["pending_no"]) or manual_payment_dates_db.get(item["pending_no"], item["payment_request_date"] or auto_date)
     return items
 
-# 🚨 [신규] 차입금 명세서 API 연동 로직
 def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
@@ -148,6 +142,7 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                     loan_id = raw.get("loand_id", "") or raw.get("group_settled_number", "LOAN-ID")
                     vendor_name = raw.get("financial_customer_name") or raw.get("direct_customer_name") or "차입 금융기관"
                     loan_type_name = raw.get("loan_type_name") or raw.get("kind_type_name") or "차입금"
+                    if "차입금" not in loan_type_name: loan_type_name += "(차입금)"
                     
                     auto_date = calculate_payment_date(from_dt, to_dt, vendor_name, balance_amount)
                     scheduled_date = payload.saved_dates.get(loan_id) or manual_payment_dates_db.get(loan_id, to_dt or auto_date)
@@ -162,9 +157,9 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                         "edm_documents": [{"doc_id": "EDM-L", "doc_type": "차입증빙", "file_name": f"차입증빙.pdf", "download_url": "#"}]
                     })
                 return parsed_items
-            else: return [{"error_msg": f"차입금 API 데이터 실패: {json_data.get('message')} - URL: {api_url}"}]
-        else: return [{"error_msg": f"차입금 서버 응답 에러 (HTTP {res.status_code}) - URL: {api_url}"}]
-    except Exception as e: return [{"error_msg": f"차입금 API 연결 오류: {str(e)}"}]
+            else: return []
+        else: return []
+    except Exception: return []
 
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
@@ -213,9 +208,30 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                         "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
                     })
                 return parsed_items
-            else: return [{"error_msg": f"API 데이터 실패: {json_data.get('message')}"}]
-        else: return [{"error_msg": f"서버 응답 에러 (HTTP {res.status_code})"}]
-    except Exception as e: return [{"error_msg": f"백엔드 연결/로직 오류: {str(e)}"}]
+            else: return []
+        else: return []
+    except Exception: return []
+
+def fetch_combined_dataset(payload: PendingSearchQuery) -> List[dict]:
+    selected = [a.strip() for a in payload.account_codes] if payload.account_codes else []
+    
+    # 아무것도 안 골랐거나, "차입금"을 포함한 경우 차입금 가져오기
+    has_loan = ("차입금" in selected) or ("LOAN" in selected) or (len(selected) == 0)
+    # 아무것도 안 골랐거나, "차입금" 외의 미결 계정이 포함된 경우 미결자료 가져오기
+    has_pending = any(a in selected for a in ["2001", "2002", "미지급금"]) or (len(selected) == 0) or (has_loan and len(selected) > 1)
+
+    if payload.use_mock:
+        return get_mock_pending_data(payload)
+
+    combined = []
+    if has_pending:
+        p_data = fetch_real_pending_data(payload)
+        combined.extend(p_data)
+    if has_loan:
+        l_data = fetch_real_loan_data(payload)
+        combined.extend(l_data)
+        
+    return combined
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if data and data[0].get("error_msg"): return data
@@ -224,7 +240,7 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
     if payload.pay_start_date and payload.pay_start_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] >= payload.pay_start_date]
     if payload.pay_end_date and payload.pay_end_date.strip() not in ["", "string"]: data = [item for item in data if item["scheduled_payment_date"] <= payload.pay_end_date]
         
-    if payload.account_codes and len(payload.account_codes) > 0 and payload.data_type == "NTSTL":
+    if payload.account_codes and len(payload.account_codes) > 0:
         filtered_by_acc = []
         for item in data:
             item_code = str(item.get("account_code", "")).lower()
@@ -232,7 +248,11 @@ def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
             match = False
             for target in payload.account_codes:
                 t = target.strip().lower()
-                if t in item_code or t in item_name: match = True; break
+                if t == "차입금" or t == "loan":
+                    if "loan" in item_code or "차입" in item_name or "loan" in item_name:
+                        match = True; break
+                elif t in item_code or t in item_name:
+                    match = True; break
             if match: filtered_by_acc.append(item)
         data = filtered_by_acc
 
@@ -257,22 +277,24 @@ def render_portal_ui():
             body {{ background-color: #f4f6f9; font-family: 'Malgun Gothic', sans-serif; }}
             .navbar {{ background-color: #1a365d; }}
             .card {{ border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
+            
             .table-responsive {{ overflow-x: auto; }}
             .resizable-table {{ table-layout: fixed; width: 100%; min-width: 1200px; border-collapse: collapse; }}
             .resizable-table th {{ position: relative; background-color: #2b4c7e; color: white; padding: 10px; border: 1px solid #dee2e6; user-select: none; }}
             .resizer {{ width: 6px; height: 100%; position: absolute; right: 0; top: 0; cursor: col-resize; z-index: 1; }}
             .resizer:hover, .resizer.resizing {{ background-color: #ffc107; border-right: 2px solid #e0a800; }}
+            
             .btn-excel {{ background-color: #1d6f42; color: white; }}
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
             .bg-summary {{ background-color: #fffbeb; }}
             .date-input {{ background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold; width: 100%; }}
-            .chk-group {{ background-color: #f8f9fa; padding: 8px 15px; border-radius: 6px; border: 1px solid #dee2e6; }}
+            .chk-group {{ background-color: #f8f9fa; padding: 8px 15px; border-radius: 6px; border: 1px solid #dee2e6; box-shadow: inset 0 1px 3px rgba(0,0,0,0.05); }}
         </style>
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 & 차입금 포털 <span class="badge bg-primary fs-6 ms-2">차입금 명세서 연동 완료 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">계정과목 차입금 통합 선택 탑재 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -286,40 +308,28 @@ def render_portal_ui():
 
         <div class="card p-3 mb-4">
             <h5 class="fw-bold text-secondary mb-3">🔍 상세 미결 & 차입금 조회 조건 (회사코드: HASL)</h5>
-            
-            <!-- 🚨 [추가] 조회 대상 선택 스위치 (미결자료 vs 차입금명세서) -->
-            <div class="row g-3 mb-3">
-                <div class="col-md-4">
-                    <label class="form-label text-primary fw-bold fs-6">📌 조회 대상 선택</label>
-                    <select class="form-select form-select-lg fw-bold border-primary text-primary" id="dataTypeSelect">
-                        <option value="NTSTL" selected>1. 미결자료 조회 (외상매입금 / 미지급금)</option>
-                        <option value="LOAN">2. 차입금 명세서 조회 (금융기관 차입금)</option>
-                    </select>
-                </div>
-            </div>
-
             <div class="row g-3 mb-2">
                 <div class="col-md-2">
-                    <label class="form-label text-secondary fw-bold">발생/시작일</label>
+                    <label class="form-label text-secondary fw-bold">발생 시작일</label>
                     <input type="date" class="form-control" id="startDate" value="2026-01-01">
                 </div>
                 <div class="col-md-2">
-                    <label class="form-label text-secondary fw-bold">종료일</label>
+                    <label class="form-label text-secondary fw-bold">발생 종료일</label>
                     <input type="date" class="form-control" id="endDate" value="2026-12-31">
                 </div>
                 <div class="col-md-2">
-                    <label class="form-label fw-bold text-success">지불/만기예정 시작일</label>
+                    <label class="form-label fw-bold text-success">지불예정 시작일</label>
                     <input type="date" class="form-control border-success" id="payStartDate" value="">
                 </div>
                 <div class="col-md-2">
-                    <label class="form-label fw-bold text-success">지불/만기예정 종료일</label>
+                    <label class="form-label fw-bold text-success">지불예정 종료일</label>
                     <input type="date" class="form-control border-success" id="payEndDate" value="">
                 </div>
             </div>
 
             <div class="row g-3 mb-2 align-items-end">
                 <div class="col-md-6">
-                    <label class="form-label text-secondary fw-bold">미결 계정과목 선택 (미결 조회 시 적용)</label>
+                    <label class="form-label text-secondary fw-bold">계정과목 선택 (스위치 - 다중 선택 가능)</label>
                     <div class="chk-group d-flex gap-4 align-items-center">
                         <div class="form-check form-switch">
                             <input class="form-check-input acc-chk" type="checkbox" value="2001" id="acc2001">
@@ -333,16 +343,21 @@ def render_portal_ui():
                             <input class="form-check-input acc-chk" type="checkbox" value="미지급금" id="accUnpaid">
                             <label class="form-check-label fw-bold" for="accUnpaid">미지급금</label>
                         </div>
+                        <!-- 🚨 [추가] 차입금 계정과목 선택 스위치 -->
+                        <div class="form-check form-switch">
+                            <input class="form-check-input acc-chk" type="checkbox" value="차입금" id="accLoan">
+                            <label class="form-check-label fw-bold text-primary" for="accLoan">🏦 차입금</label>
+                        </div>
                     </div>
                 </div>
 
                 <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label>
-                    <input type="text" class="form-control" id="vendorCode" placeholder="예: KB국민은행 또는 케이씨">
+                    <input type="text" class="form-control" id="vendorCode" placeholder="예: (주) 와이에이치마린 또는 KB국민은행">
                 </div>
                 <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">미결/차입 번호</label>
-                    <input type="text" class="form-control" id="pendingNo" placeholder="예: 번호 검색">
+                    <input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026... 또는 번호">
                 </div>
             </div>
 
@@ -367,7 +382,7 @@ def render_portal_ui():
                             <th style="width: 120px;">외화(원화잔액)</th>
                             <th style="width: 140px;">원화환산액</th>
                             <th style="width: 110px;">자동산정일</th>
-                            <th style="width: 150px; background-color: #1b5e20;">지불예정일(수정)</th>
+                            <th style="width: 150px; background-color: #1b5e20;">지불/만기예정일(수정)</th>
                             <th style="width: 80px;">저장</th>
                         </tr>
                     </thead>
@@ -379,7 +394,7 @@ def render_portal_ui():
         </div>
 
         <div class="card p-3 border-warning">
-            <h5 class="fw-bold text-warning mb-3">📊 지불/만기 계획 요약 (통화별 합계)</h5>
+            <h5 class="fw-bold text-warning mb-3">📊 지불 / 만기 계획 요약 (통화별 합계)</h5>
             <div class="table-responsive">
                 <table class="table table-bordered text-center align-middle">
                     <thead class="bg-light"><tr><th>통화 (Currency)</th><th>통화별 원화 환산 합계 (KRW Converted)</th></tr></thead>
@@ -425,7 +440,6 @@ def render_portal_ui():
                 document.querySelectorAll('.acc-chk:checked').forEach(chk => selectedAccs.push(chk.value));
 
                 return {{
-                    data_type: document.getElementById("dataTypeSelect").value,
                     branch_code: "본사",
                     start_date: document.getElementById("startDate").value,
                     end_date: document.getElementById("endDate").value,
@@ -466,7 +480,7 @@ def render_portal_ui():
                          return;
                     }}
                     if(data.length === 0) {{
-                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">검색 조건에 일치하는 데이터가 없습니다.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">검색 조건에 일치하는 건이 없습니다.</td></tr>';
                         return;
                     }}
 
@@ -513,7 +527,7 @@ def render_portal_ui():
 
             function downloadExcel() {{
                 fetch('/api/pending/export-plan-excel', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(buildSearchPayload(false)) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불계획서.xlsx`; a.click(); }});
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불_만기계획서.xlsx`; a.click(); }});
             }}
             
             function downloadEdmZip() {{
@@ -541,10 +555,7 @@ def read_root(): return {"status": "online"}
 @app.post("/api/pending/search-and-schedule")
 def search_and_schedule_pending(payload: PendingSearchQuery):
     try: 
-        if payload.use_mock:
-            raw_data = get_mock_pending_data(payload)
-        else:
-            raw_data = fetch_real_loan_data(payload) if payload.data_type == "LOAN" else fetch_real_pending_data(payload)
+        raw_data = fetch_combined_dataset(payload)
         return filter_data(payload, raw_data)
     except Exception as e: return [{"error_msg": f"백엔드 처리 오류: {str(e)}"}]
 
@@ -555,11 +566,9 @@ def save_payment_date(payload: PaymentDateSaveRequest):
 
 @app.post("/api/pending/export-plan-excel")
 def export_plan_excel(payload: PendingSearchQuery):
-    raw_data = get_mock_pending_data(payload) if payload.use_mock else (fetch_real_loan_data(payload) if payload.data_type == "LOAN" else fetch_real_pending_data(payload))
-    filtered_data = filter_data(payload, raw_data)
-    
+    filtered_data = filter_data(payload, fetch_combined_dataset(payload))
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "지불_만기계획서"
-    ws.append(["지불/만기예정일", "미결/차입번호", "구분", "거래처/금융기관", "통화", "환율", "발생/차입금액", "원화환산액", "자동산정일"])
+    ws.append(["지불/만기예정일", "미결/차입번호", "계정/차입구분", "거래처/금융기관", "통화", "환율", "발생/차입금액", "원화환산액", "자동산정일"])
     for cell in ws[1]: cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid"); cell.font = Font(color="FFFFFF", bold=True); cell.alignment = Alignment(horizontal="center")
     for row in filtered_data:
         if row.get("error_msg"): continue
@@ -569,9 +578,7 @@ def export_plan_excel(payload: PendingSearchQuery):
 
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
-    raw_data = get_mock_pending_data(payload) if payload.use_mock else (fetch_real_loan_data(payload) if payload.data_type == "LOAN" else fetch_real_pending_data(payload))
-    filtered_data = filter_data(payload, raw_data)
-    
+    filtered_data = filter_data(payload, fetch_combined_dataset(payload))
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
