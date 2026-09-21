@@ -9,12 +9,12 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.styles import Font, Alignment, PatternFill, borders
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (Adobe Acrobat 100% 호환 표준 PDF 바이너리 탑재)",
-    version="12.4.0"
+    description="SamsApi 실시간 연동 (결재용 송금신청서 엑셀 다운로드 탑재)",
+    version="14.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -31,24 +31,6 @@ REGULAR_SUPPLIERS = {
     "베스트마린코프", "금양엔지니어링", "(주)상봉코포레이션", "(주)디에스케이",
     "주식회사 케이피에스", "(주)해바다", "(주)케이씨", "충무전기공업사", "(주)그린-씨"
 }
-
-# 🚨 [완벽 보완] Adobe Acrobat Reader 100% 무오류 호환 표준 PDF 바이너리
-PERFECT_PDF_BASE64 = (
-    "JVBERi0xLjQKJfbkwzEAMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+"
-    "CmVuZG9iaiAyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAx"
-    "ID4+CmVuZG9iaiAzIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlh"
-    "Qm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDQgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQg"
-    "PDwgL0YxIDw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZl"
-    "dGljYSA+PiA+PiA+PiA+PgplbmRvYmogNCAwIG9iago8PCAvTGVuZ3RoIDUzID4+CnN0cmVh"
-    "bQpCVCAvRjEgMTIgVGYgNTAgNzAwIFRkIChFRE0gU2FtcGxlIERvY3VtZW50KSBUaiBFVApl"
-    "bmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA1CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAx"
-    "NSA0MDAwMCBuIAowMDAwMDAwMDY4IDAwMDAwIG4gCjAwMDAwMDAxMjUgMDAwMDAgbiAKMDAw"
-    "MDAwMDI3MyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDUgL1Jvb3QgMSAwIFIgPj4Kc3Rh"
-    "cnR4cmVmCjM3NgolJUVPRgo="
-)
-
-def generate_valid_pdf_bytes(vendor_name: str, pending_no: str, krw_balance: float) -> bytes:
-    return base64.b64decode(PERFECT_PDF_BASE64)
 
 def get_payment_days_by_amount(amount: float) -> int:
     if amount <= 2_000_000: return 90
@@ -91,9 +73,9 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045", "edm_documents": [{"doc_id": "EDM-1", "doc_type": "Invoice", "file_name": "TIME_MARINE_INV.pdf", "download_url": "#"}]},
-        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012", "edm_documents": [{"doc_id": "EDM-2", "doc_type": "세금계산서", "file_name": "KC_Tax.pdf", "download_url": "#"}]},
-        {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "confirmed_voucher_no": "LN-001", "edm_documents": [{"doc_id": "EDM-L1", "doc_type": "차입약정서", "file_name": "KB_Loan.pdf", "download_url": "#"}]}
+        {"pending_no": "APS202606250008-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007003", "vendor_name": "TIME MARINE CO., LTD", "occur_date": "2026-06-03", "acc_date": "2026-06-22", "payment_request_date": "2026-07-03", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 130.00, "balance_amount": 130.00, "krw_balance": 196469.0, "confirmed_voucher_no": "VC20260622-0045"},
+        {"pending_no": "APS202607090021-0002", "account_code": "2103", "account_name": "미지급금(원화)", "vendor_code": "003143", "vendor_name": "(주)케이씨", "occur_date": "2026-06-03", "acc_date": "2026-06-07", "payment_request_date": "", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 6711000.00, "balance_amount": 6711000.00, "krw_balance": 6711000.0, "confirmed_voucher_no": "VC20260607-0012"},
+        {"pending_no": "LN20260901-001", "account_code": "LOAN", "account_name": "운전자금차입금(차입금)", "vendor_code": "001001", "vendor_name": "KB국민은행", "occur_date": "2026-03-01", "acc_date": "2026-03-01", "payment_request_date": "2026-09-30", "currency": "KRW", "exchange_rate": 1.0, "occur_amount": 500000000.0, "balance_amount": 500000000.0, "krw_balance": 500000000.0, "confirmed_voucher_no": "LN-001"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -121,20 +103,24 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                 raw_list = json_data.get("data", [])
                 parsed_items = []
                 for raw in raw_list:
-                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                    from_dt = format_date(raw.get("from_date", ""))
-                    to_dt = format_date(raw.get("to_date", ""))
-                    
                     def parse_float(val):
                         try: return float(val) if val else 0.0
                         except: return 0.0
 
                     balance_amount = parse_float(raw.get("balance_amount"))
                     loan_amount = parse_float(raw.get("loan_amount"))
-                    if payload.unsettled_only and balance_amount <= 0: continue
+                    if balance_amount <= 0: continue
                     
-                    loan_id = raw.get("loand_id", "") or raw.get("group_settled_number", "LOAN-ID")
-                    vendor_name = raw.get("financial_customer_name") or raw.get("direct_customer_name") or "차입 금융기관"
+                    loan_id = str(raw.get("loand_id") or raw.get("group_settled_number") or "").strip()
+                    if not loan_id: continue
+
+                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
+                    from_dt = format_date(raw.get("from_date", ""))
+                    to_dt = format_date(raw.get("to_date", ""))
+                    
+                    vendor_name = raw.get("financial_customer_name") or raw.get("direct_customer_name") or ""
+                    if not vendor_name: continue
+                    
                     loan_type_name = raw.get("loan_type_name") or raw.get("kind_type_name") or "차입금"
                     if "차입금" not in loan_type_name: loan_type_name += "(차입금)"
                     
@@ -147,8 +133,7 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                         "occur_date": from_dt, "acc_date": from_dt,
                         "payment_request_date": to_dt, "currency": raw.get("currency_code", "KRW"), "exchange_rate": 1.0,
                         "occur_amount": loan_amount, "balance_amount": balance_amount, "krw_balance": balance_amount,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
-                        "edm_documents": [{"doc_id": "EDM-L", "doc_type": "차입증빙", "file_name": f"차입증빙.pdf", "download_url": "#"}]
+                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", "")
                     })
                 return parsed_items
             else: return []
@@ -179,27 +164,32 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                 raw_list = json_data.get("data", [])
                 parsed_items = []
                 for raw in raw_list:
-                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
-                    occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
                     def parse_float(val):
                         try: return float(val) if val else 0.0
                         except: return 0.0
                         
                     krw_balance = parse_float(raw.get("local_amount_bal") or raw.get("functional_amount_bal"))
                     balance_amount = parse_float(raw.get("occur_amount_bal") or raw.get("local_amount_bal"))
-                    if payload.unsettled_only and balance_amount <= 0: continue
+                    if balance_amount <= 0 or krw_balance <= 0: continue
                     
-                    pending_no = raw.get("not_settled_number", "")
-                    auto_date = calculate_payment_date(occur_date, due_date, raw.get("customer_name", ""), krw_balance)
+                    pending_no = str(raw.get("not_settled_number") or "").strip()
+                    if not pending_no: continue
+
+                    def format_date(d_str): return f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}" if d_str and len(d_str)==8 else d_str
+                    occur_date = format_date(raw.get("occur_date", "")); due_date = format_date(raw.get("due_date", ""))
+                    
+                    vendor_name = raw.get("customer_name") or ""
+                    if not vendor_name: continue
+
+                    auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
                     scheduled_date = payload.saved_dates.get(pending_no) or manual_payment_dates_db.get(pending_no, auto_date)
 
                     parsed_items.append({
                         "pending_no": pending_no, "account_code": raw.get("account_code", ""), "account_name": raw.get("account_name", ""),
-                        "vendor_code": raw.get("customer_code", ""), "vendor_name": raw.get("customer_name", ""), "occur_date": occur_date, "acc_date": occur_date,
+                        "vendor_code": raw.get("customer_code", ""), "vendor_name": vendor_name, "occur_date": occur_date, "acc_date": occur_date,
                         "payment_request_date": due_date, "currency": raw.get("currency_code", "KRW"), "exchange_rate": parse_float(raw.get("occur_exchange_rate")),
                         "occur_amount": parse_float(raw.get("occur_amount_ocr")), "balance_amount": balance_amount, "krw_balance": krw_balance,
-                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", ""),
-                        "edm_documents": [{"doc_id": "EDM-1", "doc_type": "증빙", "file_name": f"증빙.pdf", "download_url": "#"}]
+                        "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date, "confirmed_voucher_no": raw.get("group_settled_number", "")
                     })
                 return parsed_items
             else: return []
@@ -208,21 +198,14 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
 
 def fetch_combined_dataset(payload: PendingSearchQuery) -> List[dict]:
     selected = [a.strip() for a in payload.account_codes] if payload.account_codes else []
-    
     has_loan = ("차입금" in selected) or ("LOAN" in selected) or (len(selected) == 0)
     has_pending = any(a in selected for a in ["2001", "2002", "미지급금"]) or (len(selected) == 0) or (has_loan and len(selected) > 1)
 
-    if payload.use_mock:
-        return get_mock_pending_data(payload)
+    if payload.use_mock: return get_mock_pending_data(payload)
 
     combined = []
-    if has_pending:
-        p_data = fetch_real_pending_data(payload)
-        combined.extend(p_data)
-    if has_loan:
-        l_data = fetch_real_loan_data(payload)
-        combined.extend(l_data)
-        
+    if has_pending: combined.extend(fetch_real_pending_data(payload))
+    if has_loan: combined.extend(fetch_real_loan_data(payload))
     return combined
 
 def filter_data(payload: PendingSearchQuery, data: List[dict]) -> List[dict]:
@@ -269,14 +252,13 @@ def render_portal_ui():
             body {{ background-color: #f4f6f9; font-family: 'Malgun Gothic', sans-serif; }}
             .navbar {{ background-color: #1a365d; }}
             .card {{ border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
-            
             .table-responsive {{ overflow-x: auto; }}
             .resizable-table {{ table-layout: fixed; width: 100%; min-width: 1200px; border-collapse: collapse; }}
             .resizable-table th {{ position: relative; background-color: #2b4c7e; color: white; padding: 10px; border: 1px solid #dee2e6; user-select: none; }}
             .resizer {{ width: 6px; height: 100%; position: absolute; right: 0; top: 0; cursor: col-resize; z-index: 1; }}
             .resizer:hover, .resizer.resizing {{ background-color: #ffc107; border-right: 2px solid #e0a800; }}
-            
             .btn-excel {{ background-color: #1d6f42; color: white; }}
+            .btn-remit {{ background-color: #e67e22; color: white; }} /* 송금신청서 전용 주황색 버튼 */
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
             .bg-summary {{ background-color: #fffbeb; }}
@@ -286,7 +268,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">Acrobat 100% 호환 적용 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">결재용 송금신청서 탑재 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -344,18 +326,20 @@ def render_portal_ui():
 
                 <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label>
-                    <input type="text" class="form-control" id="vendorCode" placeholder="예: (주) 와이에이치마린 또는 KB국민은행">
+                    <input type="text" class="form-control" id="vendorCode" placeholder="예: KB국민은행">
                 </div>
                 <div class="col-md-3">
                     <label class="form-label text-secondary fw-bold">미결/차입 번호</label>
-                    <input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026... 또는 번호">
+                    <input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026...">
                 </div>
             </div>
 
             <div class="d-flex justify-content-end gap-2 mt-3">
                 <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
-                <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">엑셀(계획)</button>
+                <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">리스트(엑셀)</button>
+                <!-- 🚨 [추가] 송금신청서 엑셀 다운로드 버튼 -->
+                <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">선택건 송금신청서(엑셀)</button>
                 <button class="btn btn-zip fw-bold px-4" onclick="downloadEdmZip()">선택항목 증빙 ZIP</button>
             </div>
         </div>
@@ -471,7 +455,7 @@ def render_portal_ui():
                          return;
                     }}
                     if(data.length === 0) {{
-                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">검색 조건에 일치하는 건이 없습니다.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-muted fw-bold">검색 조건에 일치하는 데이터가 없습니다.</td></tr>';
                         return;
                     }}
 
@@ -518,7 +502,19 @@ def render_portal_ui():
 
             function downloadExcel() {{
                 fetch('/api/pending/export-plan-excel', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(buildSearchPayload(false)) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `지불_만기계획서.xlsx`; a.click(); }});
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `전체_지불_계획리스트.xlsx`; a.click(); }});
+            }}
+
+            // 🚨 [추가] 송금신청서 다운로드 JS 로직
+            function downloadRemittanceForm() {{
+                const checkedBoxes = document.querySelectorAll('.row-chk:checked');
+                if (checkedBoxes.length === 0) {{ alert("송금신청서를 작성할 건을 체크박스로 먼저 선택해주세요."); return; }}
+                
+                const payload = buildSearchPayload(false);
+                payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
+
+                fetch('/api/pending/export-remittance-form', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
+                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `송금신청서(기안용).xlsx`; a.click(); }});
             }}
             
             function downloadEdmZip() {{
@@ -527,8 +523,19 @@ def render_portal_ui():
                 const payload = buildSearchPayload(false);
                 payload.selected_pending_nos = Array.from(checkedBoxes).map(cb => cb.value);
 
+                const btn = document.querySelector('.btn-zip');
+                const originalText = btn.innerText;
+                btn.innerText = "원본 다운로드 중...";
+                btn.disabled = true;
+
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
-                .then(res => res.blob()).then(blob => {{ const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `선택_증빙자료.zip`; a.click(); }});
+                .then(res => res.blob()).then(blob => {{ 
+                    const a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = `실제_EDM_원본증빙.zip`; a.click(); 
+                    btn.innerText = originalText; btn.disabled = false;
+                }}).catch(() => {{ 
+                    alert("다운로드 중 오류가 발생했습니다."); 
+                    btn.innerText = originalText; btn.disabled = false;
+                }});
             }}
             
             window.onload = function() {{ 
@@ -558,29 +565,172 @@ def save_payment_date(payload: PaymentDateSaveRequest):
 @app.post("/api/pending/export-plan-excel")
 def export_plan_excel(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
-    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "지불_만기계획서"
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "전체_리스트"
     ws.append(["지불/만기예정일", "미결/차입번호", "계정/차입구분", "거래처/금융기관", "통화", "환율", "발생/차입금액", "원화환산액", "자동산정일"])
     for cell in ws[1]: cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid"); cell.font = Font(color="FFFFFF", bold=True); cell.alignment = Alignment(horizontal="center")
     for row in filtered_data:
         if row.get("error_msg"): continue
         ws.append([row["scheduled_payment_date"], row["pending_no"], row.get("account_name", ""), row["vendor_name"], row["currency"], row["exchange_rate"], row["balance_amount"], row["krw_balance"], row["auto_payment_date"]])
     stream = io.BytesIO(); wb.save(stream); stream.seek(0)
-    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Payment_Plan.xlsx"})
+    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=List.xlsx"})
+
+# 🚨 [신규 추가] 송금신청서 엑셀 다운로드 API
+@app.post("/api/pending/export-remittance-form")
+def export_remittance_form(payload: PendingSearchQuery):
+    filtered_data = filter_data(payload, fetch_combined_dataset(payload))
+    
+    # 체크박스로 선택한 건만 필터링
+    if payload.selected_pending_nos:
+        filtered_data = [item for item in filtered_data if item["pending_no"] in payload.selected_pending_nos]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "송금신청서"
+
+    # 스타일 세팅
+    title_font = Font(size=18, bold=True)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    center_align = Alignment(horizontal="center", vertical="center")
+    right_align = Alignment(horizontal="right", vertical="center")
+    thin_border = borders.Border(
+        left=borders.Side(style='thin'), right=borders.Side(style='thin'),
+        top=borders.Side(style='thin'), bottom=borders.Side(style='thin')
+    )
+
+    # 1. 엑셀 상단 제목 (병합)
+    ws.merge_cells("A1:I2")
+    title_cell = ws["A1"]
+    title_cell.value = "송 금 신 청 서 (지 급 품 의)"
+    title_cell.font = title_font
+    title_cell.alignment = center_align
+
+    # 2. 작성일자
+    ws["A4"] = f"작성일자 : {datetime.today().strftime('%Y-%m-%d')}"
+    ws["A4"].font = Font(bold=True)
+
+    # 3. 테이블 헤더
+    headers = ["순번", "지불예정일", "수취인(거래처명)", "통화", "청구금액", "원화금액(KRW)", "은행명(수기)", "계좌번호(수기)", "적요(미결번호)"]
+    ws.append([]) # 5행 공란
+    ws.append(headers) # 6행 헤더
+    for col_idx, cell in enumerate(ws[6], 1):
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    # 4. 데이터 삽입
+    total_krw = 0
+    for i, row in enumerate(filtered_data, 1):
+        if row.get("error_msg"): continue
+        
+        krw_bal = row.get("krw_balance", 0)
+        total_krw += krw_bal
+        
+        data_row = [
+            i,
+            row.get("scheduled_payment_date", ""),
+            row.get("vendor_name", ""),
+            row.get("currency", ""),
+            row.get("balance_amount", 0),
+            krw_bal,
+            "", # 은행명 (엑셀에서 수기 입력하도록 공란 처리)
+            "", # 계좌번호 (엑셀에서 수기 입력하도록 공란 처리)
+            row.get("pending_no", "")
+        ]
+        ws.append(data_row)
+        
+        for cell in ws[ws.max_row]:
+            cell.border = thin_border
+            if cell.column in [1, 2, 4, 7, 8, 9]: cell.alignment = center_align # 텍스트 중앙정렬
+            elif cell.column in [5, 6]: # 금액 우측정렬 및 콤마
+                cell.number_format = '#,##0'
+                cell.alignment = right_align
+
+    # 5. 합계 행
+    ws.append(["합계", "", "", "", "", total_krw, "", "", ""])
+    total_row = ws.max_row
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=5)
+    
+    sum_cell = ws.cell(row=total_row, column=1)
+    sum_cell.value = "합 계 (Total)"
+    sum_cell.alignment = center_align
+    sum_cell.font = Font(bold=True)
+    
+    for cell in ws[total_row]:
+        cell.border = thin_border
+        cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        if cell.column == 6:
+            cell.number_format = '#,##0'
+            cell.font = Font(bold=True, color="FF0000") # 합계는 빨간색 볼드체
+
+    # 6. 컬럼 너비 조정
+    widths = {'A': 6, 'B': 14, 'C': 30, 'D': 8, 'E': 15, 'F': 18, 'G': 15, 'H': 25, 'I': 25}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Remittance_Form.xlsx"})
 
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
     zip_buffer = io.BytesIO()
+    
+    active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
+    headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
+    edm_api_url = f"{SAMSAPI_BASE_URL}/api/v1/edm/list"
+    
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
         for item in filtered_data:
             if item.get("error_msg"): continue
             if payload.selected_pending_nos and item["pending_no"] not in payload.selected_pending_nos: continue
-            for doc in item.get("edm_documents", []):
-                valid_pdf_data = generate_valid_pdf_bytes(item['vendor_name'], item['pending_no'], item['krw_balance'])
+            
+            if payload.use_mock:
+                dummy_pdf = base64.b64decode("JVBERi0xLjQKJfbkwzEAMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iaiAyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iaiAzIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDQgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PiA+PiA+PiA+PgplbmRvYmogNCAwIG9iago8PCAvTGVuZ3RoIDUzID4+CnN0cmVhbQpCVCAvRjEgMTIgVGYgNTAgNzAwIFRkIChFRE0gU2FtcGxlIERvY3VtZW50KSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA1CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSA0MDAwMCBuIAowMDAwMDAwMDY4IDAwMDAwIG4gCjAwMDAwMDAxMjUgMDAwMDAgbiAKMDAwMDAwMDI3MyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDUgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM3NgolJUVPRgo=")
                 clean_vendor = item['vendor_name'].replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
-                new_filename = f"{counter}_{clean_vendor}_{doc['doc_type']}.pdf"
-                zip_file.writestr(new_filename, valid_pdf_data)
+                zip_file.writestr(f"{counter}_{clean_vendor}_MOCK_FILE.pdf", dummy_pdf)
                 counter += 1
+                continue
+                
+            journal_number = item.get("pending_no", "")
+            confirmed_voucher = item.get("confirmed_voucher_no", "")
+            clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
+            
+            req_body = {"company_code": "HASL", "journal_number": journal_number, "language_gubun": "KO"}
+            
+            try:
+                res = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
+                edm_list = res.json().get("data", []) if res.status_code == 200 and res.json().get("success") else []
+                
+                if not edm_list and confirmed_voucher and confirmed_voucher != journal_number:
+                    req_body["journal_number"] = confirmed_voucher
+                    res2 = requests.post(edm_api_url, headers=headers, json=req_body, timeout=10)
+                    if res2.status_code == 200 and res2.json().get("success"):
+                        edm_list = res2.json().get("data", [])
+
+                if not edm_list:
+                    zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"SAMSAPI 서버에 {item['pending_no']} 에 대한 증빙 파일이 없습니다.".encode('utf-8'))
+                else:
+                    for edm in edm_list:
+                        real_filename = edm.get("filename", f"document_{counter}.pdf")
+                        download_url = edm.get("downloadurl", "")
+                        
+                        if download_url:
+                            if download_url.startswith("/"):
+                                download_url = SAMSAPI_BASE_URL + download_url
+                                
+                            file_res = requests.get(download_url, headers=headers, timeout=20)
+                            if file_res.status_code == 200:
+                                new_filename = f"{counter}_{clean_vendor}_{real_filename}"
+                                zip_file.writestr(new_filename, file_res.content)
+                        counter += 1
+            except Exception as e:
+                zip_file.writestr(f"{counter}_{clean_vendor}_다운로드오류.txt", f"EDM API 연결 실패: {str(e)}".encode('utf-8'))
+                counter += 1
+                
     zip_buffer.seek(0)
-    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=EDM_Documents.zip"})
+    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=Real_EDM_Documents.zip"})
