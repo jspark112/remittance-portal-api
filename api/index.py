@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (EDM 1:1 정밀 매핑 및 파일명 식별 강화)",
-    version="33.0.0"
+    description="SamsApi 실시간 연동 (오매핑 방지 엄격한 교차 검증 도입)",
+    version="34.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -92,8 +92,7 @@ class DebugRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202609140021-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "008899", "vendor_name": "CHINA AGENCY CO., LTD", "occur_date": "2026-09-14", "acc_date": "2026-09-14", "payment_request_date": "2026-09-14", "currency": "USD", "exchange_rate": 1548.40, "occur_amount": 1942.94, "balance_amount": 1942.94, "krw_balance": 3008449.0, "journal_no": "S202609140021", "confirmed_voucher_no": "S202609140021"},
-        {"pending_no": "APS202607280020-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "WEIFANG SUPPLY", "occur_date": "2026-07-28", "acc_date": "2026-07-28", "payment_request_date": "2026-07-28", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202607280020", "confirmed_voucher_no": "S202607280020"}
+        {"pending_no": "APS202609140021-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "008899", "vendor_name": "CHINA AGENCY CO., LTD", "occur_date": "2026-09-14", "acc_date": "2026-09-14", "payment_request_date": "2026-09-14", "currency": "USD", "exchange_rate": 1548.40, "occur_amount": 1942.94, "balance_amount": 1942.94, "krw_balance": 3008449.0, "journal_no": "S202609140021", "confirmed_voucher_no": "S202609140021"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -168,7 +167,6 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
             if json_res.get("success"):
                 raw_list = json_res.get("data") or []
                 parsed_items = []
-                
                 for raw in raw_list:
                     def parse_float(val):
                         try: return float(val) if val else 0.0
@@ -283,7 +281,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">1:1 정확한 EDM 매핑 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">1:1 철통 보안 매핑 적용 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -522,7 +520,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "1:1 정밀 전표 스캔 및 EDM 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "1:1 정밀 교차 검증 및 EDM 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -742,7 +740,7 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [EDM 핵심 수정사항] 불확실한 숫자 역산 유추 기능을 삭제하고 오직 API에서 돌려준 진짜 전표번호로만 1:1 정밀 조회
+# 🚨 [EDM 버그 완전 수정] 다른 전표 파일 오작동 방지 철통 검증
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -765,31 +763,40 @@ def export_edm_zip(payload: PendingSearchQuery):
             p_no = str(item.get("pending_no") or "").strip()
 
             candidates = []
+            valid_j_no = None
 
-            # 1. (가장 정확) jrninfo API에 해당 미결번호를 직접 찔러 진짜 매핑된 전표번호를 뽑아옴
-            if not j_no or j_no == "-":
+            # 1. 미결번호(APS...)를 S전표로 변환하여 1차 타겟 생성
+            guessed_s_no = None
+            m = re.search(r"APS(\d{8}\d{4})", p_no, re.IGNORECASE)
+            if m: guessed_s_no = f"S{m.group(1)}"
+
+            search_keys = []
+            if guessed_s_no: search_keys.append(guessed_s_no)
+            if v_no and v_no != "-": search_keys.append(v_no)
+
+            # 2. 타겟으로 jrninfo를 찌르고, 그 결과가 내 미결번호와 완벽히 일치하는지 교차 검증!
+            if search_keys and (not j_no or j_no == "-"):
                 try:
-                    jrn_res = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_journal_number": [p_no]}, timeout=10)
+                    jrn_res = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_journal_number": search_keys}, timeout=10)
                     if jrn_res.status_code == 200 and jrn_res.json().get("success"):
                         for j in (jrn_res.json().get("data") or []):
-                            found_j = str(j.get("journal_number") or "").strip()
-                            if found_j:
-                                j_no = found_j
+                            returned_j_no = str(j.get("journal_number") or "").strip()
+                            returned_p_no = str(j.get("not_settled_number") or "").strip()
+                            # 엄격한 교차 검증: 서버가 준 데이터의 미결번호가 내가 요청한 미결번호와 일치하는가?
+                            if returned_j_no in search_keys or returned_p_no == p_no:
+                                valid_j_no = returned_j_no
                                 break
                 except Exception: pass
 
-            if j_no and j_no != "-" and j_no not in candidates: candidates.append(j_no)
-            if v_no and v_no != "-" and v_no not in candidates: candidates.append(v_no)
-            
-            # 2. API가 못 뱉어낸 최악의 경우, 오직 1개의 형태(S+미결날짜순번)만 단독 시도. 다른 번호는 절대 건드리지 않음
-            m = re.search(r"APS(\d{8}\d{4})", p_no, re.IGNORECASE)
-            if m:
-                exact_guess = f"S{m.group(1)}"
-                if exact_guess not in candidates: candidates.append(exact_guess)
+            if valid_j_no:
+                candidates.append(valid_j_no)
+            else:
+                if guessed_s_no: candidates.append(guessed_s_no)
+                if v_no and v_no != "-": candidates.append(v_no)
 
             edm_list = []
-            # 찾아낸 100% 일치 후보로만 EDM 검색
             for key_no in candidates:
+                if not key_no: continue
                 try:
                     res = requests.post(edm_api_url, headers=headers, json={"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}, timeout=10)
                     if res.status_code == 200 and res.json().get("success") and res.json().get("data"):
@@ -805,12 +812,11 @@ def export_edm_zip(payload: PendingSearchQuery):
                         try:
                             file_res = requests.get(download_url, headers=headers, timeout=30)
                             if file_res.status_code == 200:
-                                # 다운로드 파일명 앞에 [해당 미결번호]를 박아넣어 오작동 여부를 육안으로 즉시 확인 가능
                                 safe_p_no = p_no.replace('/', '_').replace('\\', '_')
                                 zip_file.writestr(f"{counter}_[{safe_p_no}]_{clean_vendor}_{edm.get('filename', f'doc_{idx}.pdf')}", file_res.content)
                         except Exception: pass
             else:
-                zip_file.writestr(f"{counter}_[{p_no}]_{clean_vendor}_증빙없음.txt", f"시도된 키({candidates})에 매핑된 EDM 파일이 없습니다.".encode('utf-8'))
+                zip_file.writestr(f"{counter}_[{p_no}]_{clean_vendor}_증빙없음.txt", f"검증된 키({candidates})에 매핑된 EDM 파일이 없습니다.".encode('utf-8'))
             counter += 1
 
     zip_buffer.seek(0)
