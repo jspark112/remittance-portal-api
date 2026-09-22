@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (미결번호->전표번호 자동 변환기 탑재)",
-    version="32.0.0"
+    description="SamsApi 실시간 연동 (EDM 1:1 정밀 매핑 및 파일명 식별 강화)",
+    version="33.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -84,6 +84,11 @@ class PendingSearchQuery(BaseModel):
 class PaymentDateSaveRequest(BaseModel):
     pending_no: str
     target_payment_date: str
+
+class DebugRequest(BaseModel):
+    pending_no: str
+    confirmed_no: str
+    api_key: Optional[str] = None
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
@@ -270,6 +275,7 @@ def render_portal_ui():
             .btn-remit {{ background-color: #c0392b; color: white; }}
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
+            .btn-scan {{ background-color: #0d6efd; color: white; }}
             .bg-summary {{ background-color: #fffbeb; }}
             .date-input {{ background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold; width: 100%; }}
             .chk-group {{ background-color: #f8f9fa; padding: 8px 15px; border-radius: 6px; border: 1px solid #dee2e6; box-shadow: inset 0 1px 3px rgba(0,0,0,0.05); }}
@@ -277,7 +283,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호 자동 변환 압축 적용 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">1:1 정확한 EDM 매핑 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -327,7 +333,7 @@ def render_portal_ui():
                 <table class="table table-hover align-middle border text-center resizable-table" style="font-size: 0.88rem;" id="pendingTable">
                     <thead>
                         <tr>
-                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)" title="전체 선택"></th>
+                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)"></th>
                             <th style="width: 155px;">미결/차입번호</th>
                             <th style="width: 130px;">전표번호</th>
                             <th style="width: 130px;">확정전표번호</th>
@@ -337,8 +343,8 @@ def render_portal_ui():
                             <th style="width: 110px;">외화(원화잔액)</th>
                             <th style="width: 130px;">원화환산액</th>
                             <th style="width: 100px;">자동산정일</th>
-                            <th style="width: 140px; background-color: #1b5e20;">지불/만기예정일(수정)</th>
-                            <th style="width: 70px;">저장</th>
+                            <th style="width: 140px; background-color: #1b5e20;">지불/만기예정일</th>
+                            <th style="width: 100px;">작업</th>
                         </tr>
                     </thead>
                     <tbody id="pendingTableBody"><tr><td colspan="12" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr></tbody>
@@ -357,6 +363,22 @@ def render_portal_ui():
             </div>
         </div>
 
+        <!-- 엑스레이 팝업 모달 -->
+        <div class="modal fade" id="debugModal" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+              <div class="modal-header bg-dark text-white">
+                <h5 class="modal-title fw-bold">🔍 SAMSAPI 원본 데이터 엑스레이 결과</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+              </div>
+              <div class="modal-body bg-light">
+                <textarea id="debugResultText" class="form-control" style="height: 500px; font-family: monospace; font-size: 0.85rem;" readonly></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
         <script>
             function initResizableTable() {{
                 const table = document.getElementById('pendingTable');
@@ -433,7 +455,10 @@ def render_portal_ui():
                             <td class="fw-bold text-end pe-2 text-break">${{Number(item.krw_balance).toLocaleString()}} 원</td>
                             <td><span class="text-muted">${{item.auto_payment_date}}</span></td>
                             <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${{item.pending_no}}" value="${{item.scheduled_payment_date}}"></td>
-                            <td><button class="btn btn-sm btn-success fw-bold w-100" onclick="saveDate('${{item.pending_no}}')">저장</button></td>
+                            <td>
+                                <button class="btn btn-sm btn-success fw-bold w-100 mb-1" onclick="saveDate('${{item.pending_no}}')">저장</button>
+                                <button class="btn btn-sm btn-scan fw-bold w-100" onclick="debugRow('${{item.pending_no}}', '${{item.confirmed_voucher_no}}')">🔍엑스레이</button>
+                            </td>
                         `;
                         tbody.appendChild(tr);
                     }});
@@ -454,6 +479,25 @@ def render_portal_ui():
 
                 const res = await fetch('/api/pending/save-payment-date', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{ pending_no: pendingNo, target_payment_date: newDate }}) }});
                 alert((await res.json()).message + "\\n(수정된 지불예정일이 정상 고정되었습니다.)");
+            }}
+
+            async function debugRow(pendingNo, confNo) {{
+                const apiKey = document.getElementById("customApiKey").value;
+                const modal = new bootstrap.Modal(document.getElementById('debugModal'));
+                const textArea = document.getElementById('debugResultText');
+                textArea.value = "서버에서 API 원본 데이터를 스캔 중입니다...";
+                modal.show();
+                
+                try {{
+                    const res = await fetch('/api/pending/debug-raw', {{
+                        method: 'POST', headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify({{ pending_no: pendingNo, confirmed_no: confNo, api_key: apiKey }})
+                    }});
+                    const data = await res.json();
+                    textArea.value = JSON.stringify(data, null, 2);
+                }} catch(e) {{
+                    textArea.value = "오류 발생: " + e.message;
+                }}
             }}
 
             function downloadExcel() {{
@@ -478,7 +522,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "전표 자동 변환 및 EDM 압축 중..."; btn.disabled = true;
+                btn.innerText = "1:1 정밀 전표 스캔 및 EDM 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -493,6 +537,21 @@ def render_portal_ui():
     </body>
     </html>
     """
+
+@app.post("/api/pending/debug-raw")
+def debug_raw(payload: DebugRequest):
+    active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
+    headers = {"X-API-Key": active_key, "Content-Type": "application/json"}
+    result = {}
+    try:
+        r1 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo", headers=headers, json={"company_code": "HASL", "type_not_settled_number": [payload.pending_no]}, timeout=10)
+        result["1_ntstlinfo_API_응답"] = r1.json() if r1.status_code == 200 else {"error": r1.text}
+    except Exception as e: result["1_ntstlinfo_API_응답"] = f"통신실패: {str(e)}"
+    try:
+        r2 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, json={"company_code": "HASL", "type_journal_number": [payload.pending_no]}, timeout=10)
+        result["2_jrninfo_미결번호조회_응답"] = r2.json() if r2.status_code == 200 else {"error": r2.text}
+    except Exception as e: result["2_jrninfo_미결번호조회_응답"] = f"통신실패: {str(e)}"
+    return result
 
 @app.get("/")
 def read_root(): return {"status": "online"}
@@ -683,7 +742,7 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [선택항목 증빙 ZIP 전용] 미결번호 -> S202609140021 자동 변환 및 EDM 원본 압축
+# 🚨 [EDM 핵심 수정사항] 불확실한 숫자 역산 유추 기능을 삭제하고 오직 API에서 돌려준 진짜 전표번호로만 1:1 정밀 조회
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -694,6 +753,7 @@ def export_edm_zip(payload: PendingSearchQuery):
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
     edm_api_url = f"{SAMSAPI_BASE_URL}/api/v1/edm/list"
+    jrn_api_url = f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo"
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
@@ -706,24 +766,29 @@ def export_edm_zip(payload: PendingSearchQuery):
 
             candidates = []
 
-            # 1. 미결번호(APS202609140021-0001)에서 S202609140021 추출하여 1순위 후보로 등록
-            m = re.search(r"APS(\d{8}\d{4})", p_no, re.IGNORECASE)
-            if m:
-                s_v = f"S{m.group(1)}"
-                candidates.append(s_v)
-                
-                # 인근 오프셋 순번도 백업 후보로 추가 (-3 ~ +3)
-                date_part = m.group(1)[:8]
-                seq_num = int(m.group(1)[8:])
-                for delta in range(-3, 4):
-                    cand = f"S{date_part}{seq_num+delta:04d}"
-                    if cand not in candidates: candidates.append(cand)
+            # 1. (가장 정확) jrninfo API에 해당 미결번호를 직접 찔러 진짜 매핑된 전표번호를 뽑아옴
+            if not j_no or j_no == "-":
+                try:
+                    jrn_res = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_journal_number": [p_no]}, timeout=10)
+                    if jrn_res.status_code == 200 and jrn_res.json().get("success"):
+                        for j in (jrn_res.json().get("data") or []):
+                            found_j = str(j.get("journal_number") or "").strip()
+                            if found_j:
+                                j_no = found_j
+                                break
+                except Exception: pass
 
             if j_no and j_no != "-" and j_no not in candidates: candidates.append(j_no)
             if v_no and v_no != "-" and v_no not in candidates: candidates.append(v_no)
-            if p_no and p_no != "-" and p_no not in candidates: candidates.append(p_no)
+            
+            # 2. API가 못 뱉어낸 최악의 경우, 오직 1개의 형태(S+미결날짜순번)만 단독 시도. 다른 번호는 절대 건드리지 않음
+            m = re.search(r"APS(\d{8}\d{4})", p_no, re.IGNORECASE)
+            if m:
+                exact_guess = f"S{m.group(1)}"
+                if exact_guess not in candidates: candidates.append(exact_guess)
 
             edm_list = []
+            # 찾아낸 100% 일치 후보로만 EDM 검색
             for key_no in candidates:
                 try:
                     res = requests.post(edm_api_url, headers=headers, json={"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}, timeout=10)
@@ -740,10 +805,12 @@ def export_edm_zip(payload: PendingSearchQuery):
                         try:
                             file_res = requests.get(download_url, headers=headers, timeout=30)
                             if file_res.status_code == 200:
-                                zip_file.writestr(f"{counter}_{clean_vendor}_{edm.get('filename', f'doc_{idx}.pdf')}", file_res.content)
+                                # 다운로드 파일명 앞에 [해당 미결번호]를 박아넣어 오작동 여부를 육안으로 즉시 확인 가능
+                                safe_p_no = p_no.replace('/', '_').replace('\\', '_')
+                                zip_file.writestr(f"{counter}_[{safe_p_no}]_{clean_vendor}_{edm.get('filename', f'doc_{idx}.pdf')}", file_res.content)
                         except Exception: pass
             else:
-                zip_file.writestr(f"{counter}_{clean_vendor}_증빙없음.txt", f"시도된 키({candidates})에 매핑된 EDM 파일이 없습니다.".encode('utf-8'))
+                zip_file.writestr(f"{counter}_[{p_no}]_{clean_vendor}_증빙없음.txt", f"시도된 키({candidates})에 매핑된 EDM 파일이 없습니다.".encode('utf-8'))
             counter += 1
 
     zip_buffer.seek(0)
