@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (미결조회 API를 통한 정석 전표번호 획득 방식)",
-    version="38.0.0"
+    description="SamsApi 실시간 연동 (미결번호 기반 전표번호 이중 스캔 엔진 장착)",
+    version="39.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -281,7 +281,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">정석 매핑 시스템 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호 이중 스캔 엔진 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -520,7 +520,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "미결정보 조회 및 EDM 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "전표번호 탐색 및 EDM 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -542,13 +542,13 @@ def debug_raw(payload: DebugRequest):
     headers = {"X-API-Key": active_key, "Content-Type": "application/json"}
     result = {}
     try:
-        r1 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo", headers=headers, json={"company_code": "HASL", "not_settled_number": payload.pending_no, "type_not_settled_number": [payload.pending_no]}, timeout=10)
-        result["1_ntstlinfo_API_응답"] = r1.json() if r1.status_code == 200 else {"error": r1.text}
-    except Exception as e: result["1_ntstlinfo_API_응답"] = f"통신실패: {str(e)}"
+        r1 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, json={"company_code": "HASL", "type_not_settled_number": [payload.pending_no]}, timeout=10)
+        result["1_jrninfo_전표조회_응답"] = r1.json() if r1.status_code == 200 else {"error": r1.text}
+    except Exception as e: result["1_jrninfo_전표조회_응답"] = f"통신실패: {str(e)}"
     try:
-        r2 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, json={"company_code": "HASL", "not_settled_number": payload.pending_no, "type_not_settled_number": [payload.pending_no]}, timeout=10)
-        result["2_jrninfo_미결번호조회_응답"] = r2.json() if r2.status_code == 200 else {"error": r2.text}
-    except Exception as e: result["2_jrninfo_미결번호조회_응답"] = f"통신실패: {str(e)}"
+        r2 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo", headers=headers, json={"company_code": "HASL", "type_not_settled_number": [payload.pending_no]}, timeout=10)
+        result["2_ntstlinfo_미결조회_응답"] = r2.json() if r2.status_code == 200 else {"error": r2.text}
+    except Exception as e: result["2_ntstlinfo_미결조회_응답"] = f"통신실패: {str(e)}"
     return result
 
 @app.get("/")
@@ -740,11 +740,7 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-
-# 🚨 [지시사항 100% 반영] 
-# 1. 미결 조회 프로그램(ntstlinfo)에서 미결번호를 조회
-# 2. 거기서 반환되는 전표번호를 추출
-# 3. 추출된 전표번호로 EDM 자료 다운로드 (확정전표번호는 제외)
+# 🚨 [지시사항 100% 반영] 미결번호를 전표API/미결API에 검색하여 실제 매핑된 전표번호 획득 -> EDM 1:1 다운로드
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -755,9 +751,8 @@ def export_edm_zip(payload: PendingSearchQuery):
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
     
-    # 1. 미결번호를 조회하는 프로그램(ntstlinfo)
+    jrn_api_url = f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo"
     ntstlinfo_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo"
-    # 2. EDM 조회 프로그램
     edm_api_url = f"{SAMSAPI_BASE_URL}/api/v1/edm/list"
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -767,39 +762,40 @@ def export_edm_zip(payload: PendingSearchQuery):
             p_no = str(item.get("pending_no") or "").strip()
             exact_journal_no = None
 
-            # [1단계] 미결 조회 프로그램에 미결번호를 넣어 조회합니다.
+            # [1단계] 전표조회(jrninfo) 프로그램에서 미결번호로 조회하여 전표번호 획득 (가장 확실)
             try:
-                res_info = requests.post(
-                    ntstlinfo_url,
-                    headers=headers,
-                    # 만약을 대비해 미결번호를 배열과 문자열 모두로 전송
-                    json={"company_code": "HASL", "not_settled_number": p_no, "type_not_settled_number": [p_no]},
-                    timeout=10
-                )
-                if res_info.status_code == 200 and res_info.json().get("success"):
-                    info_data = res_info.json().get("data") or []
-                    if info_data:
-                        # [2단계] 조회 프로그램이 응답한 정답 전표번호 획득 (예: S202503280033)
-                        exact_journal_no = str(info_data[0].get("journal_number") or info_data[0].get("journal_no") or "").strip()
+                res_jrn = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_not_settled_number": [p_no]}, timeout=10)
+                if res_jrn.status_code == 200 and res_jrn.json().get("success"):
+                    for data in (res_jrn.json().get("data") or []):
+                        j_no = str(data.get("journal_number") or data.get("journal_no") or "").strip()
+                        if j_no and j_no != "-":
+                            exact_journal_no = j_no
+                            break
             except Exception: pass
 
-            # [3단계] 획득한 전표번호로만 EDM 자료 조회
-            edm_list = []
-            if exact_journal_no and exact_journal_no != "-":
+            # [2단계] 전표조회에 없다면, 미결조회(ntstlinfo) 프로그램에서 한 번 더 교차 검색
+            if not exact_journal_no:
                 try:
-                    res_edm = requests.post(
-                        edm_api_url,
-                        headers=headers,
-                        json={"company_code": "HASL", "journal_number": exact_journal_no, "language_gubun": "KO"},
-                        timeout=10
-                    )
+                    res_info = requests.post(ntstlinfo_url, headers=headers, json={"company_code": "HASL", "type_not_settled_number": [p_no]}, timeout=10)
+                    if res_info.status_code == 200 and res_info.json().get("success"):
+                        for data in (res_info.json().get("data") or []):
+                            j_no = str(data.get("journal_number") or data.get("journal_no") or "").strip()
+                            if j_no and j_no != "-":
+                                exact_journal_no = j_no
+                                break
+                except Exception: pass
+
+            # [3단계] 획득한 '전표번호' 하나만으로 EDM 자료 조회 및 저장
+            edm_list = []
+            if exact_journal_no:
+                try:
+                    res_edm = requests.post(edm_api_url, headers=headers, json={"company_code": "HASL", "journal_number": exact_journal_no, "language_gubun": "KO"}, timeout=10)
                     if res_edm.status_code == 200 and res_edm.json().get("success"):
                         edm_list = res_edm.json().get("data") or []
                 except Exception: pass
 
             safe_p_no = p_no.replace('/', '_').replace('\\', '_')
             
-            # 파일 다운로드 처리
             if edm_list:
                 for idx, edm in enumerate(edm_list, 1):
                     download_url = edm.get("downloadurl", "")
@@ -814,11 +810,11 @@ def export_edm_zip(payload: PendingSearchQuery):
                                 )
                         except Exception: pass
             else:
-                target_desc = exact_journal_no if exact_journal_no else "미결조회에서 전표번호 확인불가"
-                zip_file.writestr(
-                    f"{counter}_[{safe_p_no}]_{clean_vendor}_증빙없음.txt",
-                    f"미결번호 [{p_no}]에 매핑된 전표({target_desc})의 EDM 증빙 파일이 없습니다.".encode('utf-8')
-                )
+                if exact_journal_no:
+                    msg = f"미결번호 [{p_no}]에 매핑된 전표번호({exact_journal_no})를 찾았으나, 해당 전표에 첨부된 EDM 증빙 파일이 없습니다."
+                else:
+                    msg = f"미결번호 [{p_no}]로 전표/미결조회 API를 모두 검색했으나 매핑된 전표번호를 찾을 수 없습니다."
+                zip_file.writestr(f"{counter}_[{safe_p_no}]_{clean_vendor}_증빙없음.txt", msg.encode('utf-8'))
             counter += 1
 
     zip_buffer.seek(0)
