@@ -21,8 +21,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (확정전표조회 jrninfo API 브릿지 완벽 연결)",
-    version="27.0.0"
+    description="SamsApi 실시간 연동 (Null 데이터 방어코드 적용)",
+    version="28.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -109,7 +109,7 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
         res = requests.post(api_url, headers=headers, json=req_body, timeout=10)
         if res.status_code == 200 and res.json().get("success"):
             parsed_items = []
-            for raw in res.json().get("data", []):
+            for raw in (res.json().get("data") or []):
                 def parse_float(val):
                     try: return float(val) if val else 0.0
                     except: return 0.0
@@ -119,12 +119,14 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                 loan_id = str(raw.get("loand_id") or raw.get("group_settled_number") or "").strip()
                 if not loan_id: continue
 
-                from_dt = raw.get("from_date", "")
+                # Null 방어코드 적용
+                from_dt = str(raw.get("from_date") or "").strip()
                 from_dt = f"{from_dt[:4]}-{from_dt[4:6]}-{from_dt[6:]}" if len(from_dt)==8 else from_dt
-                to_dt = raw.get("to_date", "")
+                
+                to_dt = str(raw.get("to_date") or "").strip()
                 to_dt = f"{to_dt[:4]}-{to_dt[4:6]}-{to_dt[6:]}" if len(to_dt)==8 else to_dt
                 
-                vendor_name = raw.get("financial_customer_name") or raw.get("direct_customer_name") or ""
+                vendor_name = str(raw.get("financial_customer_name") or raw.get("direct_customer_name") or "").strip()
                 if not vendor_name: continue
                 
                 auto_date = calculate_payment_date(from_dt, to_dt, vendor_name, balance_amount)
@@ -156,14 +158,12 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     req_body = {"company_code": "HASL", "target_date": target_dt.replace("-", ""), "type_account_code": acc_code_param, "type_customer_code": []}
 
     try:
-        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=10)
+        res = requests.post(api_url, headers=headers, params={"page": 1, "pageSize": 2000}, json=req_body, timeout=15)
         if res.status_code == 200:
             json_res = res.json()
             if json_res.get("success"):
-                raw_list = json_res.get("data", [])
+                raw_list = json_res.get("data") or []  # 🚨 Null 데이터 방어
                 parsed_items = []
-                
-                # 🚨 [브릿지 API용 검색키 수집]
                 search_keys = set()
                 
                 for raw in raw_list:
@@ -178,12 +178,14 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     pending_no = str(raw.get("not_settled_number") or "").strip()
                     if not pending_no: continue
 
-                    occur_date = raw.get("occur_date", "")
+                    # 🚨 Null 데이터 방어 (이 부분에서 에러가 났던 것입니다)
+                    occur_date = str(raw.get("occur_date") or "").strip()
                     occur_date = f"{occur_date[:4]}-{occur_date[4:6]}-{occur_date[6:]}" if len(occur_date)==8 else occur_date
-                    due_date = raw.get("due_date", "")
+                    
+                    due_date = str(raw.get("due_date") or "").strip()
                     due_date = f"{due_date[:4]}-{due_date[4:6]}-{due_date[6:]}" if len(due_date)==8 else due_date
                     
-                    vendor_name = raw.get("customer_name") or ""
+                    vendor_name = str(raw.get("customer_name") or "").strip()
                     if not vendor_name: continue
 
                     auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
@@ -201,17 +203,14 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                         "journal_no": journal_no, "confirmed_voucher_no": confirmed_no
                     })
                     
-                    # 브릿지 검색을 위해 확정전표/미결번호 수집
                     if confirmed_no: search_keys.add(confirmed_no)
                     if pending_no: search_keys.add(pending_no)
 
-                # 🚨 [브릿지 로직] 확정전표조회(jrninfo) API 호출하여 누락된 전표번호 100% 매핑
                 if search_keys:
                     search_keys = list(search_keys)
                     jrn_map_by_pending = {}
                     jrn_map_by_conf = {}
                     
-                    # API 페이로드 초과 방지를 위해 500개씩 분할 요청
                     chunk_size = 500
                     for i in range(0, len(search_keys), chunk_size):
                         chunk = search_keys[i:i+chunk_size]
@@ -220,19 +219,16 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                             jrn_res = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, params={"page": 1, "pageSize": 2000}, json=jrn_req_body, timeout=10)
                             
                             if jrn_res.status_code == 200 and jrn_res.json().get("success"):
-                                for j in jrn_res.json().get("data", []):
+                                for j in (jrn_res.json().get("data") or []):
                                     p_no = str(j.get("not_settled_number") or "").strip()
                                     j_no = str(j.get("journal_number") or "").strip()
                                     c_no = str(j.get("fixed_journal_number") or j.get("group_settled_number") or "").strip()
                                     
-                                    # 미결번호 기준 매핑
                                     if p_no and j_no: jrn_map_by_pending[p_no] = j_no
-                                    # 확정전표 기준 매핑
                                     if c_no and j_no: jrn_map_by_conf[c_no] = j_no
                         except Exception:
                             pass
                             
-                    # 수집된 전표번호를 리스트에 삽입
                     for item in parsed_items:
                         if not item["journal_no"] or item["journal_no"] == "-":
                             p_no = item["pending_no"]
@@ -524,7 +520,8 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "EDM 증빙 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "EDM 증빙 다운로드 중...";
+                btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
