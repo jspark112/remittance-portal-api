@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (오매핑 방지 엄격한 교차 검증 도입)",
-    version="34.0.0"
+    description="SamsApi 실시간 연동 (ntstlinfo 기반 1:1 공식 전표 검증)",
+    version="35.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -281,7 +281,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">1:1 철통 보안 매핑 적용 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">ntstlinfo 1:1 검증 엔진 적용 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -520,7 +520,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "1:1 정밀 교차 검증 및 EDM 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "공식 전표 검증 및 EDM 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -740,7 +740,7 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [EDM 버그 완전 수정] 다른 전표 파일 오작동 방지 철통 검증
+# 🚨 [EDM 1:1 정밀 조회] ntstlinfo API를 통해 해당 미결건의 공식 전표번호만 직접 추출
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -750,60 +750,52 @@ def export_edm_zip(payload: PendingSearchQuery):
     zip_buffer = io.BytesIO()
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
+    
+    ntstlinfo_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo"
     edm_api_url = f"{SAMSAPI_BASE_URL}/api/v1/edm/list"
-    jrn_api_url = f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo"
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
         for item in filtered_data:
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
-            
-            j_no = str(item.get("journal_no") or "").strip()
-            v_no = str(item.get("confirmed_voucher_no") or "").strip()
             p_no = str(item.get("pending_no") or "").strip()
 
-            candidates = []
-            valid_j_no = None
+            # 1. ntstlinfo API로 해당 미결번호의 '진짜 전표번호' 단건 조회 (임의 추측 절대 금지!)
+            exact_journal_no = None
+            try:
+                res_info = requests.post(
+                    ntstlinfo_url,
+                    headers=headers,
+                    json={"company_code": "HASL", "type_not_settled_number": [p_no]},
+                    timeout=10
+                )
+                if res_info.status_code == 200 and res_info.json().get("success"):
+                    info_data = res_info.json().get("data") or []
+                    if info_data:
+                        first = info_data[0]
+                        exact_journal_no = str(first.get("journal_number") or first.get("journal_no") or "").strip()
+            except Exception: pass
 
-            # 1. 미결번호(APS...)를 S전표로 변환하여 1차 타겟 생성
-            guessed_s_no = None
-            m = re.search(r"APS(\d{8}\d{4})", p_no, re.IGNORECASE)
-            if m: guessed_s_no = f"S{m.group(1)}"
-
-            search_keys = []
-            if guessed_s_no: search_keys.append(guessed_s_no)
-            if v_no and v_no != "-": search_keys.append(v_no)
-
-            # 2. 타겟으로 jrninfo를 찌르고, 그 결과가 내 미결번호와 완벽히 일치하는지 교차 검증!
-            if search_keys and (not j_no or j_no == "-"):
-                try:
-                    jrn_res = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_journal_number": search_keys}, timeout=10)
-                    if jrn_res.status_code == 200 and jrn_res.json().get("success"):
-                        for j in (jrn_res.json().get("data") or []):
-                            returned_j_no = str(j.get("journal_number") or "").strip()
-                            returned_p_no = str(j.get("not_settled_number") or "").strip()
-                            # 엄격한 교차 검증: 서버가 준 데이터의 미결번호가 내가 요청한 미결번호와 일치하는가?
-                            if returned_j_no in search_keys or returned_p_no == p_no:
-                                valid_j_no = returned_j_no
-                                break
-                except Exception: pass
-
-            if valid_j_no:
-                candidates.append(valid_j_no)
-            else:
-                if guessed_s_no: candidates.append(guessed_s_no)
-                if v_no and v_no != "-": candidates.append(v_no)
+            # 백엔드에 기존 보관된 진짜 전표번호가 있다면 활용
+            if not exact_journal_no or exact_journal_no == "-":
+                j_no = str(item.get("journal_no") or "").strip()
+                if j_no and j_no != "-" and not j_no.startswith("APS"):
+                    exact_journal_no = j_no
 
             edm_list = []
-            for key_no in candidates:
-                if not key_no: continue
+            if exact_journal_no and exact_journal_no != "-":
                 try:
-                    res = requests.post(edm_api_url, headers=headers, json={"company_code": "HASL", "journal_number": key_no, "language_gubun": "KO"}, timeout=10)
-                    if res.status_code == 200 and res.json().get("success") and res.json().get("data"):
-                        edm_list = res.json().get("data")
-                        break
+                    res_edm = requests.post(
+                        edm_api_url,
+                        headers=headers,
+                        json={"company_code": "HASL", "journal_number": exact_journal_no, "language_gubun": "KO"},
+                        timeout=10
+                    )
+                    if res_edm.status_code == 200 and res_edm.json().get("success") and res_edm.json().get("data"):
+                        edm_list = res_edm.json().get("data")
                 except Exception: pass
 
+            safe_p_no = p_no.replace('/', '_').replace('\\', '_')
             if edm_list:
                 for idx, edm in enumerate(edm_list, 1):
                     download_url = edm.get("downloadurl", "")
@@ -812,11 +804,17 @@ def export_edm_zip(payload: PendingSearchQuery):
                         try:
                             file_res = requests.get(download_url, headers=headers, timeout=30)
                             if file_res.status_code == 200:
-                                safe_p_no = p_no.replace('/', '_').replace('\\', '_')
-                                zip_file.writestr(f"{counter}_[{safe_p_no}]_{clean_vendor}_{edm.get('filename', f'doc_{idx}.pdf')}", file_res.content)
+                                zip_file.writestr(
+                                    f"{counter}_[{safe_p_no}]_{clean_vendor}_{edm.get('filename', f'doc_{idx}.pdf')}",
+                                    file_res.content
+                                )
                         except Exception: pass
             else:
-                zip_file.writestr(f"{counter}_[{p_no}]_{clean_vendor}_증빙없음.txt", f"검증된 키({candidates})에 매핑된 EDM 파일이 없습니다.".encode('utf-8'))
+                target_key_desc = exact_journal_no if exact_journal_no else "공식 매핑 전표 없음"
+                zip_file.writestr(
+                    f"{counter}_[{safe_p_no}]_{clean_vendor}_증빙없음.txt",
+                    f"미결번호 [{p_no}]에 공식 매핑된 전표번호({target_key_desc})의 EDM 증빙 파일이 존재하지 않습니다.".encode('utf-8')
+                )
             counter += 1
 
     zip_buffer.seek(0)
