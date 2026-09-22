@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import base64
 import requests
 import zipfile
@@ -21,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (Null 데이터 방어코드 적용)",
-    version="28.0.0"
+    description="SamsApi 실시간 연동 (데이터 엑스레이 추적기 탑재)",
+    version="30.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -84,10 +85,14 @@ class PaymentDateSaveRequest(BaseModel):
     pending_no: str
     target_payment_date: str
 
+class DebugRequest(BaseModel):
+    pending_no: str
+    confirmed_no: str
+    api_key: Optional[str] = None
+
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202607280020-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "008899", "vendor_name": "WEIFANG YACHUANG SUPPLY CHAIN CO., LTD", "occur_date": "2026-07-28", "acc_date": "2026-07-28", "payment_request_date": "2026-07-28", "currency": "USD", "exchange_rate": 1548.40, "occur_amount": 1942.94, "balance_amount": 1942.94, "krw_balance": 3008449.0, "journal_no": "S202607280015", "confirmed_voucher_no": "S202607280015"},
-        {"pending_no": "APS202601070040-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "006671", "vendor_name": "UNITED MARINE PTE LTD", "occur_date": "2025-12-31", "acc_date": "2025-12-31", "payment_request_date": "2026-01-07", "currency": "USD", "exchange_rate": 1511.30, "occur_amount": 12500.00, "balance_amount": 12500.00, "krw_balance": 18891250.0, "journal_no": "S202601070052", "confirmed_voucher_no": "S202512310117"}
+        {"pending_no": "APS202503280017-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "PT. INHUA MARITIME", "occur_date": "2025-03-28", "acc_date": "2025-03-28", "payment_request_date": "2025-04-25", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202503280017", "confirmed_voucher_no": "S202503280017"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -119,10 +124,8 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
                 loan_id = str(raw.get("loand_id") or raw.get("group_settled_number") or "").strip()
                 if not loan_id: continue
 
-                # Null 방어코드 적용
                 from_dt = str(raw.get("from_date") or "").strip()
                 from_dt = f"{from_dt[:4]}-{from_dt[4:6]}-{from_dt[6:]}" if len(from_dt)==8 else from_dt
-                
                 to_dt = str(raw.get("to_date") or "").strip()
                 to_dt = f"{to_dt[:4]}-{to_dt[4:6]}-{to_dt[6:]}" if len(to_dt)==8 else to_dt
                 
@@ -148,6 +151,19 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
         return []
     except Exception: return []
 
+def generate_candidate_vouchers(pending_nos: List[str]) -> List[str]:
+    candidates = set()
+    for p_no in pending_nos:
+        m = re.search(r"APS(\d{8})(\d{4})", p_no, re.IGNORECASE)
+        if m:
+            date_part = m.group(1)
+            seq_num = int(m.group(2))
+            start_seq = max(1, seq_num - 25)
+            end_seq = seq_num + 25
+            for i in range(start_seq, end_seq + 1):
+                candidates.add(f"S{date_part}{i:04d}")
+    return list(candidates)
+
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
@@ -162,9 +178,9 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
         if res.status_code == 200:
             json_res = res.json()
             if json_res.get("success"):
-                raw_list = json_res.get("data") or []  # 🚨 Null 데이터 방어
+                raw_list = json_res.get("data") or []
                 parsed_items = []
-                search_keys = set()
+                pending_no_list = []
                 
                 for raw in raw_list:
                     def parse_float(val):
@@ -178,7 +194,6 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     pending_no = str(raw.get("not_settled_number") or "").strip()
                     if not pending_no: continue
 
-                    # 🚨 Null 데이터 방어 (이 부분에서 에러가 났던 것입니다)
                     occur_date = str(raw.get("occur_date") or "").strip()
                     occur_date = f"{occur_date[:4]}-{occur_date[4:6]}-{occur_date[6:]}" if len(occur_date)==8 else occur_date
                     
@@ -202,41 +217,31 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                         "auto_payment_date": auto_date, "scheduled_payment_date": scheduled_date,
                         "journal_no": journal_no, "confirmed_voucher_no": confirmed_no
                     })
-                    
-                    if confirmed_no: search_keys.add(confirmed_no)
-                    if pending_no: search_keys.add(pending_no)
+                    pending_no_list.append(pending_no)
 
-                if search_keys:
-                    search_keys = list(search_keys)
+                candidate_vouchers = generate_candidate_vouchers(pending_no_list)
+                if candidate_vouchers:
                     jrn_map_by_pending = {}
                     jrn_map_by_conf = {}
-                    
                     chunk_size = 500
-                    for i in range(0, len(search_keys), chunk_size):
-                        chunk = search_keys[i:i+chunk_size]
+                    for i in range(0, len(candidate_vouchers), chunk_size):
+                        chunk = candidate_vouchers[i:i+chunk_size]
                         try:
-                            jrn_req_body = {"company_code": "HASL", "type_journal_number": chunk}
-                            jrn_res = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, params={"page": 1, "pageSize": 2000}, json=jrn_req_body, timeout=10)
-                            
+                            jrn_res = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, params={"page": 1, "pageSize": 2000}, json={"company_code": "HASL", "type_journal_number": chunk}, timeout=10)
                             if jrn_res.status_code == 200 and jrn_res.json().get("success"):
                                 for j in (jrn_res.json().get("data") or []):
                                     p_no = str(j.get("not_settled_number") or "").strip()
                                     j_no = str(j.get("journal_number") or "").strip()
                                     c_no = str(j.get("fixed_journal_number") or j.get("group_settled_number") or "").strip()
-                                    
                                     if p_no and j_no: jrn_map_by_pending[p_no] = j_no
                                     if c_no and j_no: jrn_map_by_conf[c_no] = j_no
-                        except Exception:
-                            pass
+                        except Exception: pass
                             
                     for item in parsed_items:
-                        if not item["journal_no"] or item["journal_no"] == "-":
-                            p_no = item["pending_no"]
-                            c_no = item["confirmed_voucher_no"]
-                            if p_no in jrn_map_by_pending:
-                                item["journal_no"] = jrn_map_by_pending[p_no]
-                            elif c_no in jrn_map_by_conf:
-                                item["journal_no"] = jrn_map_by_conf[c_no]
+                        p_no = item["pending_no"]
+                        c_no = item["confirmed_voucher_no"]
+                        if p_no in jrn_map_by_pending: item["journal_no"] = jrn_map_by_pending[p_no]
+                        elif c_no in jrn_map_by_conf: item["journal_no"] = jrn_map_by_conf[c_no]
 
                 return parsed_items
             else:
@@ -308,6 +313,7 @@ def render_portal_ui():
             .btn-remit {{ background-color: #c0392b; color: white; }}
             .btn-zip {{ background-color: #6f42c1; color: white; }}
             .btn-mock {{ background-color: #6c757d; color: white; border-color: #6c757d; }}
+            .btn-scan {{ background-color: #0d6efd; color: white; }}
             .bg-summary {{ background-color: #fffbeb; }}
             .date-input {{ background-color: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20; font-weight: bold; width: 100%; }}
             .chk-group {{ background-color: #f8f9fa; padding: 8px 15px; border-radius: 6px; border: 1px solid #dee2e6; box-shadow: inset 0 1px 3px rgba(0,0,0,0.05); }}
@@ -315,7 +321,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">확정전표 API 완벽 연동 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">🔍 SAMSAPI 원본 데이터 엑스레이 탑재 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -347,12 +353,11 @@ def render_portal_ui():
                     </div>
                 </div>
 
-                <div class="col-md-3"><label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label><input type="text" class="form-control" id="vendorCode" placeholder="예: WEIFANG"></div>
-                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026..."></div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label><input type="text" class="form-control" id="vendorCode" placeholder="예: INHUA"></div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS2025..."></div>
             </div>
 
             <div class="d-flex justify-content-end gap-2 mt-3">
-                <button class="btn btn-mock fw-bold px-4" onclick="loadPendingData(true)">MOCK조회(테스트)</button>
                 <button class="btn btn-primary fw-bold px-5" onclick="loadPendingData(false)">조회(API)</button>
                 <button class="btn btn-excel fw-bold px-4" onclick="downloadExcel()">리스트(엑셀)</button>
                 <button class="btn btn-remit fw-bold px-4" onclick="downloadRemittanceForm()">📄 BNK 외화송금신청서(워드)</button>
@@ -365,7 +370,7 @@ def render_portal_ui():
                 <table class="table table-hover align-middle border text-center resizable-table" style="font-size: 0.88rem;" id="pendingTable">
                     <thead>
                         <tr>
-                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)" title="전체 선택"></th>
+                            <th style="width: 45px;"><input type="checkbox" id="selectAll" onclick="toggleAll(this)"></th>
                             <th style="width: 155px;">미결/차입번호</th>
                             <th style="width: 130px;">전표번호</th>
                             <th style="width: 130px;">확정전표번호</th>
@@ -375,8 +380,8 @@ def render_portal_ui():
                             <th style="width: 110px;">외화(원화잔액)</th>
                             <th style="width: 130px;">원화환산액</th>
                             <th style="width: 100px;">자동산정일</th>
-                            <th style="width: 140px; background-color: #1b5e20;">지불/만기예정일(수정)</th>
-                            <th style="width: 70px;">저장</th>
+                            <th style="width: 140px; background-color: #1b5e20;">지불/만기예정일</th>
+                            <th style="width: 100px;">작업</th>
                         </tr>
                     </thead>
                     <tbody id="pendingTableBody"><tr><td colspan="12" class="py-4 text-muted">조회 버튼을 눌러 데이터를 불러오세요.</td></tr></tbody>
@@ -384,31 +389,33 @@ def render_portal_ui():
             </div>
         </div>
 
-        <div class="card p-3 border-warning">
-            <h5 class="fw-bold text-warning mb-3">📊 지불 / 만기 계획 요약 (통화별 합계)</h5>
-            <div class="table-responsive">
-                <table class="table table-bordered text-center align-middle">
-                    <thead class="bg-light"><tr><th>통화 (Currency)</th><th>통화별 원화 환산 합계 (KRW Converted)</th></tr></thead>
-                    <tbody id="summaryTableBody"></tbody>
-                    <tfoot><tr class="bg-summary fw-bold fs-5 text-danger"><td class="text-end pe-4">총 원화 환산 지불 계획 금액 :</td><td id="grandTotalKrw">0 원</td></tr></tfoot>
-                </table>
+        <!-- 엑스레이 팝업 모달 -->
+        <div class="modal fade" id="debugModal" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+              <div class="modal-header bg-dark text-white">
+                <h5 class="modal-title fw-bold">🔍 SAMSAPI 원본 데이터 엑스레이 결과</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+              </div>
+              <div class="modal-body bg-light">
+                <p class="text-danger fw-bold">아래 텍스트를 복사해서 제미나이(저)에게 알려주시면 완벽한 매핑 로직을 작성해 드립니다!</p>
+                <textarea id="debugResultText" class="form-control" style="height: 500px; font-family: monospace; font-size: 0.85rem;" readonly></textarea>
+              </div>
             </div>
+          </div>
         </div>
 
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
         <script>
             function initResizableTable() {{
                 const table = document.getElementById('pendingTable');
                 const ths = table.querySelectorAll('th');
                 ths.forEach(th => {{
                     if(th.querySelector('.resizer')) return; 
-                    const resizer = document.createElement('div');
-                    resizer.classList.add('resizer');
-                    th.appendChild(resizer);
-                    
+                    const resizer = document.createElement('div'); resizer.classList.add('resizer'); th.appendChild(resizer);
                     let startX, startWidth;
                     resizer.addEventListener('mousedown', function(e) {{
-                        startX = e.pageX; startWidth = th.offsetWidth;
-                        resizer.classList.add('resizing');
+                        startX = e.pageX; startWidth = th.offsetWidth; resizer.classList.add('resizing');
                         function mouseMoveHandler(e) {{ const newWidth = startWidth + (e.pageX - startX); if (newWidth > 40) {{ th.style.width = newWidth + 'px'; th.style.minWidth = newWidth + 'px'; }} }}
                         function mouseUpHandler() {{ resizer.classList.remove('resizing'); document.removeEventListener('mousemove', mouseMoveHandler); document.removeEventListener('mouseup', mouseUpHandler); }}
                         document.addEventListener('mousemove', mouseMoveHandler); document.addEventListener('mouseup', mouseUpHandler); e.stopPropagation();
@@ -444,7 +451,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-primary fw-bold">데이터 조회 중입니다... (API 브릿지 탐색 중)</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-primary fw-bold">데이터 조회 중입니다...</td></tr>';
                 summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
                 
                 try {{
@@ -475,7 +482,10 @@ def render_portal_ui():
                             <td class="fw-bold text-end pe-2 text-break">${{Number(item.krw_balance).toLocaleString()}} 원</td>
                             <td><span class="text-muted">${{item.auto_payment_date}}</span></td>
                             <td><input type="date" class="form-control form-control-sm text-center date-input" id="date-${{item.pending_no}}" value="${{item.scheduled_payment_date}}"></td>
-                            <td><button class="btn btn-sm btn-success fw-bold w-100" onclick="saveDate('${{item.pending_no}}')">저장</button></td>
+                            <td>
+                                <button class="btn btn-sm btn-success fw-bold w-100 mb-1" onclick="saveDate('${{item.pending_no}}')">저장</button>
+                                <button class="btn btn-sm btn-scan fw-bold w-100" onclick="debugRow('${{item.pending_no}}', '${{item.confirmed_voucher_no}}')">🔍엑스레이</button>
+                            </td>
                         `;
                         tbody.appendChild(tr);
                     }});
@@ -496,6 +506,25 @@ def render_portal_ui():
 
                 const res = await fetch('/api/pending/save-payment-date', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{ pending_no: pendingNo, target_payment_date: newDate }}) }});
                 alert((await res.json()).message + "\\n(수정된 지불예정일이 정상 고정되었습니다.)");
+            }}
+
+            async function debugRow(pendingNo, confNo) {{
+                const apiKey = document.getElementById("customApiKey").value;
+                const modal = new bootstrap.Modal(document.getElementById('debugModal'));
+                const textArea = document.getElementById('debugResultText');
+                textArea.value = "서버에서 " + pendingNo + " 관련된 모든 원본 API 데이터를 스캔 중입니다. 잠시만 기다려주세요...";
+                modal.show();
+                
+                try {{
+                    const res = await fetch('/api/pending/debug-raw', {{
+                        method: 'POST', headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify({{ pending_no: pendingNo, confirmed_no: confNo, api_key: apiKey }})
+                    }});
+                    const data = await res.json();
+                    textArea.value = JSON.stringify(data, null, 2);
+                }} catch(e) {{
+                    textArea.value = "오류 발생: " + e.message;
+                }}
             }}
 
             function downloadExcel() {{
@@ -520,8 +549,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "EDM 증빙 다운로드 중...";
-                btn.disabled = true;
+                btn.innerText = "EDM 증빙 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -537,8 +565,27 @@ def render_portal_ui():
     </html>
     """
 
-@app.get("/")
-def read_root(): return {"status": "online"}
+# 🚨 [신규] 원본 데이터 엑스레이 (디버그) 백엔드 로직
+@app.post("/api/pending/debug-raw")
+def debug_raw(payload: DebugRequest):
+    active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
+    headers = {"X-API-Key": active_key, "Content-Type": "application/json"}
+    
+    result = {}
+    
+    # 1. 미결건 단건 조회 (ntstlinfo)
+    try:
+        r1 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo", headers=headers, json={"company_code": "HASL", "type_not_settled_number": [payload.pending_no]}, timeout=10)
+        result["1_ntstlinfo_API_응답"] = r1.json() if r1.status_code == 200 else {"error": r1.text}
+    except Exception as e: result["1_ntstlinfo_API_응답"] = f"통신실패: {str(e)}"
+    
+    # 2. 전표번호 조회 (jrninfo) - 미결번호로 찔러보기
+    try:
+        r2 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, json={"company_code": "HASL", "type_journal_number": [payload.pending_no]}, timeout=10)
+        result["2_jrninfo_미결번호조회_응답"] = r2.json() if r2.status_code == 200 else {"error": r2.text}
+    except Exception as e: result["2_jrninfo_미결번호조회_응답"] = f"통신실패: {str(e)}"
+    
+    return result
 
 @app.post("/api/pending/search-and-schedule")
 def search_and_schedule_pending(payload: PendingSearchQuery):
@@ -548,7 +595,7 @@ def search_and_schedule_pending(payload: PendingSearchQuery):
 @app.post("/api/pending/save-payment-date")
 def save_payment_date(payload: PaymentDateSaveRequest): 
     manual_payment_dates_db[payload.pending_no] = payload.target_payment_date
-    return {"status": "success", "message": f"[{payload.pending_no}] 지불예정일이 {payload.target_payment_date}로 정상 저장되었습니다."}
+    return {"status": "success", "message": f"[{payload.pending_no}] 지불예정일이 정상 저장되었습니다."}
 
 @app.post("/api/pending/export-plan-excel")
 def export_plan_excel(payload: PendingSearchQuery):
@@ -739,7 +786,6 @@ def export_edm_zip(payload: PendingSearchQuery):
         counter = 1
         for item in filtered_data:
             if payload.selected_pending_nos and item["pending_no"] not in payload.selected_pending_nos: continue
-            
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             
             candidates = []
@@ -747,9 +793,9 @@ def export_edm_zip(payload: PendingSearchQuery):
             v_no = str(item.get("confirmed_voucher_no") or "").strip()
             p_no = str(item.get("pending_no") or "").strip()
             
-            if j_no: candidates.append(j_no)
-            if v_no and v_no not in candidates: candidates.append(v_no)
-            if p_no and p_no not in candidates: candidates.append(p_no)
+            if j_no and j_no != "-": candidates.append(j_no)
+            if v_no and v_no != "-" and v_no not in candidates: candidates.append(v_no)
+            if p_no and p_no != "-" and p_no not in candidates: candidates.append(p_no)
             
             edm_list = []
             for key_no in candidates:
