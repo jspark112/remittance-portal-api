@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (미결번호 기반 전표번호 이중 스캔 엔진 장착)",
-    version="39.0.0"
+    description="SamsApi 실시간 연동 (미결번호 원본 엄격 1:1 매핑 엔진)",
+    version="41.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -92,7 +92,7 @@ class DebugRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202503280017-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "PT. INHUA MARITIME", "occur_date": "2025-03-28", "acc_date": "2025-03-28", "payment_request_date": "2025-04-25", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202503280033", "confirmed_voucher_no": "S202503280033"}
+        {"pending_no": "APS202503060033-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "PT. INHUA MARITIME", "occur_date": "2025-03-06", "acc_date": "2025-03-06", "payment_request_date": "2025-04-05", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202503060033", "confirmed_voucher_no": "S202503060033"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -191,7 +191,7 @@ def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
                     auto_date = calculate_payment_date(occur_date, due_date, vendor_name, krw_balance)
                     scheduled_date = payload.saved_dates.get(pending_no) or manual_payment_dates_db.get(pending_no, auto_date)
 
-                    journal_no = str(raw.get("journal_number") or "").strip()
+                    journal_no = str(raw.get("journal_number") or raw.get("journal_no") or "").strip()
                     confirmed_no = str(raw.get("group_settled_number") or raw.get("confirmed_voucher_no") or "").strip()
 
                     parsed_items.append({
@@ -281,7 +281,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호 이중 스캔 엔진 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">미결번호 원본 엄격 매핑 적용 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -520,7 +520,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "전표번호 탐색 및 EDM 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "미결번호 원본 검색 및 EDM 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -740,7 +740,8 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [지시사항 100% 반영] 미결번호를 전표API/미결API에 검색하여 실제 매핑된 전표번호 획득 -> EDM 1:1 다운로드
+# 🚨 [V41.0.0 핵심 지시 반영] 
+# 미결번호(APS202503060033-0001) 원본 형태를 절대로 가공/절단하지 않고 그대로 사용하여 정식 매핑 전표번호 조회
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -759,10 +760,11 @@ def export_edm_zip(payload: PendingSearchQuery):
         counter = 1
         for item in filtered_data:
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
+            # 하이픈 포함 원본 미결번호 그대로 사용
             p_no = str(item.get("pending_no") or "").strip()
             exact_journal_no = None
 
-            # [1단계] 전표조회(jrninfo) 프로그램에서 미결번호로 조회하여 전표번호 획득 (가장 확실)
+            # [1단계] 제시된 미결번호 원본(하이픈 포함) 그대로 jrninfo API 조회
             try:
                 res_jrn = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_not_settled_number": [p_no]}, timeout=10)
                 if res_jrn.status_code == 200 and res_jrn.json().get("success"):
@@ -773,7 +775,7 @@ def export_edm_zip(payload: PendingSearchQuery):
                             break
             except Exception: pass
 
-            # [2단계] 전표조회에 없다면, 미결조회(ntstlinfo) 프로그램에서 한 번 더 교차 검색
+            # [2단계] 미발견 시 제시된 미결번호 원본(하이픈 포함) 그대로 ntstlinfo API 조회
             if not exact_journal_no:
                 try:
                     res_info = requests.post(ntstlinfo_url, headers=headers, json={"company_code": "HASL", "type_not_settled_number": [p_no]}, timeout=10)
@@ -785,7 +787,7 @@ def export_edm_zip(payload: PendingSearchQuery):
                                 break
                 except Exception: pass
 
-            # [3단계] 획득한 '전표번호' 하나만으로 EDM 자료 조회 및 저장
+            # [3단계] 획득된 정식 전표번호로만 EDM 조회 (임의 추측/변환키 완전히 배제)
             edm_list = []
             if exact_journal_no:
                 try:
@@ -811,9 +813,9 @@ def export_edm_zip(payload: PendingSearchQuery):
                         except Exception: pass
             else:
                 if exact_journal_no:
-                    msg = f"미결번호 [{p_no}]에 매핑된 전표번호({exact_journal_no})를 찾았으나, 해당 전표에 첨부된 EDM 증빙 파일이 없습니다."
+                    msg = f"미결번호 [{p_no}]에 매핑된 전표번호({exact_journal_no})를 찾았으나, 해당 전표의 EDM 증빙 파일이 없습니다."
                 else:
-                    msg = f"미결번호 [{p_no}]로 전표/미결조회 API를 모두 검색했으나 매핑된 전표번호를 찾을 수 없습니다."
+                    msg = f"미결번호 [{p_no}]로 원본 조회했으나 매핑된 전표번호를 찾을 수 없습니다."
                 zip_file.writestr(f"{counter}_[{safe_p_no}]_{clean_vendor}_증빙없음.txt", msg.encode('utf-8'))
             counter += 1
 
