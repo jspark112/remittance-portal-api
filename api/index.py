@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (확정전표 미결번호 조건 1:1 타겟팅)",
-    version="36.0.0"
+    description="SamsApi 실시간 연동 (미결조회 API를 통한 정석 전표번호 획득 방식)",
+    version="38.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -92,7 +92,7 @@ class DebugRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202607280020-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007438", "vendor_name": "WEIFANG YACHUANG SUPPLY CHAIN CO., LTD", "occur_date": "2026-07-28", "acc_date": "2026-07-28", "payment_request_date": "2026-07-28", "currency": "USD", "exchange_rate": 1548.40, "occur_amount": 1942.94, "balance_amount": 1942.94, "krw_balance": 3008449.0, "journal_no": "S202607280044", "confirmed_voucher_no": "S202607010049"}
+        {"pending_no": "APS202503280017-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "PT. INHUA MARITIME", "occur_date": "2025-03-28", "acc_date": "2025-03-28", "payment_request_date": "2025-04-25", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202503280033", "confirmed_voucher_no": "S202503280033"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -281,7 +281,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">확정전표조회 1:1 매핑 적용 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">정석 매핑 시스템 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -313,8 +313,8 @@ def render_portal_ui():
                     </div>
                 </div>
 
-                <div class="col-md-3"><label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label><input type="text" class="form-control" id="vendorCode" placeholder="예: WEIFANG"></div>
-                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026..."></div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label><input type="text" class="form-control" id="vendorCode" placeholder="예: INHUA"></div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS2025..."></div>
             </div>
 
             <div class="d-flex justify-content-end gap-2 mt-3">
@@ -361,6 +361,7 @@ def render_portal_ui():
             </div>
         </div>
 
+        <!-- 엑스레이 팝업 모달 -->
         <div class="modal fade" id="debugModal" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-xl">
             <div class="modal-content">
@@ -519,7 +520,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "확정전표 1:1 조회 및 EDM 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "미결정보 조회 및 EDM 다운로드 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -541,11 +542,11 @@ def debug_raw(payload: DebugRequest):
     headers = {"X-API-Key": active_key, "Content-Type": "application/json"}
     result = {}
     try:
-        r1 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo", headers=headers, json={"company_code": "HASL", "type_not_settled_number": [payload.pending_no]}, timeout=10)
+        r1 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo", headers=headers, json={"company_code": "HASL", "not_settled_number": payload.pending_no, "type_not_settled_number": [payload.pending_no]}, timeout=10)
         result["1_ntstlinfo_API_응답"] = r1.json() if r1.status_code == 200 else {"error": r1.text}
     except Exception as e: result["1_ntstlinfo_API_응답"] = f"통신실패: {str(e)}"
     try:
-        r2 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, json={"company_code": "HASL", "type_not_settled_number": [payload.pending_no]}, timeout=10)
+        r2 = requests.post(f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo", headers=headers, json={"company_code": "HASL", "not_settled_number": payload.pending_no, "type_not_settled_number": [payload.pending_no]}, timeout=10)
         result["2_jrninfo_미결번호조회_응답"] = r2.json() if r2.status_code == 200 else {"error": r2.text}
     except Exception as e: result["2_jrninfo_미결번호조회_응답"] = f"통신실패: {str(e)}"
     return result
@@ -739,7 +740,11 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [수정] ERP 확정전표조회 프로그램과 동일하게 jrninfo API에 type_not_settled_number 조건 전달
+
+# 🚨 [지시사항 100% 반영] 
+# 1. 미결 조회 프로그램(ntstlinfo)에서 미결번호를 조회
+# 2. 거기서 반환되는 전표번호를 추출
+# 3. 추출된 전표번호로 EDM 자료 다운로드 (확정전표번호는 제외)
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -750,7 +755,9 @@ def export_edm_zip(payload: PendingSearchQuery):
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
     
-    jrn_api_url = f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo"
+    # 1. 미결번호를 조회하는 프로그램(ntstlinfo)
+    ntstlinfo_url = f"{SAMSAPI_BASE_URL}/api/v1/ntstl/ntstlinfo"
+    # 2. EDM 조회 프로그램
     edm_api_url = f"{SAMSAPI_BASE_URL}/api/v1/edm/list"
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -758,25 +765,25 @@ def export_edm_zip(payload: PendingSearchQuery):
         for item in filtered_data:
             clean_vendor = item.get('vendor_name', '알수없음').replace('/', '_').replace('\\', '_').replace('(', '').replace(')', '')
             p_no = str(item.get("pending_no") or "").strip()
-
             exact_journal_no = None
-            
-            # 1. ERP 확정전표조회 화면과 동일하게 jrninfo API의 type_not_settled_number 필드에 미결번호 전달
+
+            # [1단계] 미결 조회 프로그램에 미결번호를 넣어 조회합니다.
             try:
-                res_jrn = requests.post(
-                    jrn_api_url,
+                res_info = requests.post(
+                    ntstlinfo_url,
                     headers=headers,
-                    json={"company_code": "HASL", "type_not_settled_number": [p_no]},
+                    # 만약을 대비해 미결번호를 배열과 문자열 모두로 전송
+                    json={"company_code": "HASL", "not_settled_number": p_no, "type_not_settled_number": [p_no]},
                     timeout=10
                 )
-                if res_jrn.status_code == 200 and res_jrn.json().get("success"):
-                    jrn_data = res_jrn.json().get("data") or []
-                    if jrn_data:
-                        first = jrn_data[0]
-                        # S202607280044 번호 추출
-                        exact_journal_no = str(first.get("journal_number") or first.get("journal_no") or "").strip()
+                if res_info.status_code == 200 and res_info.json().get("success"):
+                    info_data = res_info.json().get("data") or []
+                    if info_data:
+                        # [2단계] 조회 프로그램이 응답한 정답 전표번호 획득 (예: S202503280033)
+                        exact_journal_no = str(info_data[0].get("journal_number") or info_data[0].get("journal_no") or "").strip()
             except Exception: pass
 
+            # [3단계] 획득한 전표번호로만 EDM 자료 조회
             edm_list = []
             if exact_journal_no and exact_journal_no != "-":
                 try:
@@ -786,11 +793,13 @@ def export_edm_zip(payload: PendingSearchQuery):
                         json={"company_code": "HASL", "journal_number": exact_journal_no, "language_gubun": "KO"},
                         timeout=10
                     )
-                    if res_edm.status_code == 200 and res_edm.json().get("success") and res_edm.json().get("data"):
-                        edm_list = res_edm.json().get("data")
+                    if res_edm.status_code == 200 and res_edm.json().get("success"):
+                        edm_list = res_edm.json().get("data") or []
                 except Exception: pass
 
             safe_p_no = p_no.replace('/', '_').replace('\\', '_')
+            
+            # 파일 다운로드 처리
             if edm_list:
                 for idx, edm in enumerate(edm_list, 1):
                     download_url = edm.get("downloadurl", "")
@@ -805,10 +814,10 @@ def export_edm_zip(payload: PendingSearchQuery):
                                 )
                         except Exception: pass
             else:
-                target_desc = exact_journal_no if exact_journal_no else "확정전표 매핑 없음"
+                target_desc = exact_journal_no if exact_journal_no else "미결조회에서 전표번호 확인불가"
                 zip_file.writestr(
                     f"{counter}_[{safe_p_no}]_{clean_vendor}_증빙없음.txt",
-                    f"미결번호 [{p_no}]에 매핑된 확정전표({target_desc})의 EDM 증빙 파일이 없습니다.".encode('utf-8')
+                    f"미결번호 [{p_no}]에 매핑된 전표({target_desc})의 EDM 증빙 파일이 없습니다.".encode('utf-8')
                 )
             counter += 1
 
