@@ -22,8 +22,8 @@ from docx.oxml.ns import nsdecls
 
 app = FastAPI(
     title="Remittance Portal API",
-    description="SamsApi 실시간 연동 (EDM 지연 조회 속도 최적화 적용)",
-    version="31.0.0"
+    description="SamsApi 실시간 연동 (미결번호->전표번호 자동 변환기 탑재)",
+    version="32.0.0"
 )
 
 SAMSAPI_BASE_URL = "http://samsapi.sinokor.co.kr:8400"
@@ -87,8 +87,8 @@ class PaymentDateSaveRequest(BaseModel):
 
 def get_mock_pending_data(payload: PendingSearchQuery) -> List[dict]:
     items = [
-        {"pending_no": "APS202607280020-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "008899", "vendor_name": "WEIFANG YACHUANG SUPPLY CHAIN CO., LTD", "occur_date": "2026-07-28", "acc_date": "2026-07-28", "payment_request_date": "2026-07-28", "currency": "USD", "exchange_rate": 1548.40, "occur_amount": 1942.94, "balance_amount": 1942.94, "krw_balance": 3008449.0, "journal_no": "S202607280015", "confirmed_voucher_no": "S202607280015"},
-        {"pending_no": "APS202503280017-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "PT. INHUA MARITIME", "occur_date": "2025-03-28", "acc_date": "2025-03-28", "payment_request_date": "2025-04-25", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202503280017", "confirmed_voucher_no": "S202503280017"}
+        {"pending_no": "APS202609140021-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "008899", "vendor_name": "CHINA AGENCY CO., LTD", "occur_date": "2026-09-14", "acc_date": "2026-09-14", "payment_request_date": "2026-09-14", "currency": "USD", "exchange_rate": 1548.40, "occur_amount": 1942.94, "balance_amount": 1942.94, "krw_balance": 3008449.0, "journal_no": "S202609140021", "confirmed_voucher_no": "S202609140021"},
+        {"pending_no": "APS202607280020-0001", "account_code": "2002", "account_name": "외상매입금(외화)", "vendor_code": "007001", "vendor_name": "WEIFANG SUPPLY", "occur_date": "2026-07-28", "acc_date": "2026-07-28", "payment_request_date": "2026-07-28", "currency": "USD", "exchange_rate": 1466.85, "occur_amount": 327.07, "balance_amount": 327.07, "krw_balance": 479746.0, "journal_no": "S202607280020", "confirmed_voucher_no": "S202607280020"}
     ]
     for item in items:
         auto_date = calculate_payment_date(item["occur_date"], item["payment_request_date"], item["vendor_name"], item["krw_balance"])
@@ -147,7 +147,6 @@ def fetch_real_loan_data(payload: PendingSearchQuery) -> List[dict]:
         return []
     except Exception: return []
 
-# 🚨 [속도 최적화] 목록 조회 시 무거운 jrninfo 연산을 빼고 미결 목록만 1초 만에 가져옴
 def fetch_real_pending_data(payload: PendingSearchQuery) -> List[dict]:
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
@@ -278,7 +277,7 @@ def render_portal_ui():
     </head>
     <body class="p-3">
         <nav class="navbar navbar-dark px-4 py-3 rounded mb-4 d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">초고속 목록 조회 & 선택항목 EDM 다운로드 🟢</span></span>
+            <span class="navbar-brand mb-0 h1 fw-bold">🚢 흥아해운 미결 포털 <span class="badge bg-primary fs-6 ms-2">전표번호 자동 변환 압축 적용 🟢</span></span>
         </nav>
         
         <div class="card p-3 mb-4 border-primary">
@@ -310,8 +309,8 @@ def render_portal_ui():
                     </div>
                 </div>
 
-                <div class="col-md-3"><label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label><input type="text" class="form-control" id="vendorCode" placeholder="예: INHUA"></div>
-                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS2025..."></div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">거래처/금융기관 (코드/명)</label><input type="text" class="form-control" id="vendorCode" placeholder="예: CHINA"></div>
+                <div class="col-md-3"><label class="form-label text-secondary fw-bold">미결/차입 번호</label><input type="text" class="form-control" id="pendingNo" placeholder="예: APS2026..."></div>
             </div>
 
             <div class="d-flex justify-content-end gap-2 mt-3">
@@ -403,7 +402,7 @@ def render_portal_ui():
                 const tbody = document.getElementById("pendingTableBody");
                 const summaryBody = document.getElementById("summaryTableBody");
                 
-                tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-primary fw-bold">데이터를 1초 만에 불러오는 중입니다...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="12" class="py-4 text-primary fw-bold">데이터를 불러오는 중입니다...</td></tr>';
                 summaryBody.innerHTML = ""; document.getElementById("grandTotalKrw").innerText = "0 원";
                 
                 try {{
@@ -479,7 +478,7 @@ def render_portal_ui():
 
                 const btn = document.querySelector('.btn-zip');
                 const originalText = btn.innerText;
-                btn.innerText = "전표번호 탐색 및 EDM 증빙 다운로드 중..."; btn.disabled = true;
+                btn.innerText = "전표 자동 변환 및 EDM 압축 중..."; btn.disabled = true;
 
                 fetch('/api/pending/export-edm-zip', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload) }})
                 .then(res => res.blob()).then(blob => {{ 
@@ -684,7 +683,7 @@ def export_remittance_form(payload: PendingSearchQuery):
         headers={"Content-Disposition": "attachment; filename=BNK_BUSAN_BANK_REMITTANCE_APPLICATION.docx"}
     )
 
-# 🚨 [선택항목 증빙 ZIP 클릭 시만 동작] 선택된 미결건에 한해서만 jrninfo 호출 ➔ EDM 파일 압축
+# 🚨 [선택항목 증빙 ZIP 전용] 미결번호 -> S202609140021 자동 변환 및 EDM 원본 압축
 @app.post("/api/pending/export-edm-zip")
 def export_edm_zip(payload: PendingSearchQuery):
     filtered_data = filter_data(payload, fetch_combined_dataset(payload))
@@ -695,7 +694,6 @@ def export_edm_zip(payload: PendingSearchQuery):
     active_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else DEFAULT_SAMSAPI_KEY
     headers = {"X-API-Key": active_key, "Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
     edm_api_url = f"{SAMSAPI_BASE_URL}/api/v1/edm/list"
-    jrn_api_url = f"{SAMSAPI_BASE_URL}/api/v1/jrn/jrninfo"
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         counter = 1
@@ -706,23 +704,22 @@ def export_edm_zip(payload: PendingSearchQuery):
             v_no = str(item.get("confirmed_voucher_no") or "").strip()
             p_no = str(item.get("pending_no") or "").strip()
 
-            # 선택한 항목에 전표번호가 없으면 이 때만 jrninfo로 전표번호 탐색!
-            if not j_no or j_no == "-":
-                try:
-                    search_keys = [k for k in [p_no, v_no] if k and k != "-"]
-                    if search_keys:
-                        jrn_res = requests.post(jrn_api_url, headers=headers, json={"company_code": "HASL", "type_journal_number": search_keys}, timeout=10)
-                        if jrn_res.status_code == 200 and jrn_res.json().get("success"):
-                            for j in (jrn_res.json().get("data") or []):
-                                found_j = str(j.get("journal_number") or "").strip()
-                                if found_j:
-                                    j_no = found_j
-                                    break
-                except Exception:
-                    pass
-
             candidates = []
-            if j_no and j_no != "-": candidates.append(j_no)
+
+            # 1. 미결번호(APS202609140021-0001)에서 S202609140021 추출하여 1순위 후보로 등록
+            m = re.search(r"APS(\d{8}\d{4})", p_no, re.IGNORECASE)
+            if m:
+                s_v = f"S{m.group(1)}"
+                candidates.append(s_v)
+                
+                # 인근 오프셋 순번도 백업 후보로 추가 (-3 ~ +3)
+                date_part = m.group(1)[:8]
+                seq_num = int(m.group(1)[8:])
+                for delta in range(-3, 4):
+                    cand = f"S{date_part}{seq_num+delta:04d}"
+                    if cand not in candidates: candidates.append(cand)
+
+            if j_no and j_no != "-" and j_no not in candidates: candidates.append(j_no)
             if v_no and v_no != "-" and v_no not in candidates: candidates.append(v_no)
             if p_no and p_no != "-" and p_no not in candidates: candidates.append(p_no)
 
